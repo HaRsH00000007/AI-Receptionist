@@ -1,0 +1,26 @@
+# Local development dependencies only. Nothing here is used in deployment.
+#   docker compose up -d db
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: ai-receptionist-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-receptionist}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-receptionist}
+      POSTGRES_DB: ${POSTGRES_DB:-receptionist}
+      # Deterministic collation so index ordering matches CI and production.
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-receptionist} -d ${POSTGRES_DB:-receptionist}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+volumes:
+  postgres-data:
