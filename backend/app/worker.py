@@ -6,10 +6,21 @@ A polling loop over Postgres — no queue broker, no Redis. At this volume
 Postgres is a perfectly good queue, and one fewer moving part is one fewer thing
 that can be down (docs/00_DECISIONS.md sections 4 and 5).
 
-Two loops share the process: provisioning runs and post-call processing. Both
-claim work with ``FOR UPDATE SKIP LOCKED`` and a lease, so several worker
-processes can run side by side and a crashed one hands its work back
-automatically when the lease expires.
+**Provisioning orchestration moved to Temporal in M4.** When
+``ORCHESTRATOR=temporal`` — the default — this worker does *not* claim
+provisioning runs, and :mod:`app.temporal.worker` is the only thing driving
+them. That guard is a money-safety property, not tidiness: two orchestrators
+polling the same runs would both advance them, and the step that spends money
+would be attempted twice. There is exactly one authoritative orchestrator at a
+time.
+
+The polling engine is retained, behind ``ORCHESTRATOR=state_machine``, as a
+documented fallback: it is the path 500-odd tests already prove, and keeping it
+runnable means a Temporal outage has an answer that is not "provisioning is
+down". It is not the default and is not maintained as an equal path.
+
+Post-call processing keeps polling either way — summarizing a finished call is
+queue work, not a long-running orchestration.
 """
 
 from __future__ import annotations
@@ -69,21 +80,25 @@ class Worker:
         """
         self.stats.polls += 1
 
-        async with self.session_factory() as session:
-            run_ids = await claim_runs(
-                session,
-                batch_size=self.settings.worker_batch_size,
-                lease_s=self.settings.provisioning_step_timeout_s,
-            )
-
-        for run_id in run_ids:
+        # The single-orchestrator guard. Under Temporal these runs belong to a
+        # workflow; claiming them here would run a second orchestrator over the
+        # same steps and could buy a second phone number.
+        if not self.settings.uses_temporal:
             async with self.session_factory() as session:
-                report = await self.engine.execute_next_step(session, run_id)
-            self.stats.steps_executed += 1
-            logger.debug(
-                "run advanced",
-                extra={"run_id": str(run_id), "outcome": report.outcome},
-            )
+                run_ids = await claim_runs(
+                    session,
+                    batch_size=self.settings.worker_batch_size,
+                    lease_s=self.settings.provisioning_step_timeout_s,
+                )
+
+            for run_id in run_ids:
+                async with self.session_factory() as session:
+                    report = await self.engine.execute_next_step(session, run_id)
+                self.stats.steps_executed += 1
+                logger.debug(
+                    "run advanced",
+                    extra={"run_id": str(run_id), "outcome": report.outcome},
+                )
 
         async with self.session_factory() as session:
             call_ids = await claim_calls(
@@ -107,6 +122,12 @@ class Worker:
                 "poll_interval_s": self.settings.worker_poll_interval_s,
                 "batch_size": self.settings.worker_batch_size,
                 "dry_run": self.settings.dry_run,
+                "orchestrator": self.settings.orchestrator,
+                # Loud on purpose: which process owns provisioning is the first
+                # thing to check when a run is not advancing.
+                "provisioning_owner": (
+                    "temporal" if self.settings.uses_temporal else "this worker"
+                ),
             },
         )
         while not self._stopping.is_set():

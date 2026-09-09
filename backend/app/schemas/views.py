@@ -43,6 +43,28 @@ class StepView(BaseModel):
     finished_at: datetime | None
 
 
+class BillingView(BaseModel):
+    """The minimum billing state the status page needs.
+
+    Deliberately small. It answers one question — "is this tenant entitled, and
+    if not why not?" — because that is what turns an otherwise silent
+    BILLING_BLOCKED run into something a customer can act on.
+
+    No Stripe identifiers. A customer id or subscription id is a processor
+    handle with no meaning to the browser, and putting one in an API response
+    only widens what a leaked response discloses.
+    """
+
+    #: The authoritative answer, computed server-side from the subscription
+    #: row. The client is never trusted to assert this.
+    entitled: bool
+    plan: str | None = None
+    status: str | None = None
+    trial_ends_at: datetime | None = None
+    #: Why provisioning is blocked, when it is. A stable code, not a sentence.
+    reason: str | None = None
+
+
 class ProvisioningView(BaseModel):
     """The status page's whole payload."""
 
@@ -60,6 +82,9 @@ class ProvisioningView(BaseModel):
     #: Steps succeeded / total. Cheaper for a UI than deriving it.
     completed_steps: int
     total_steps: int
+    #: Present so a run parked on billing can explain itself rather than
+    #: appearing stuck.
+    billing: BillingView | None = None
 
 
 class PhoneNumberView(BaseModel):

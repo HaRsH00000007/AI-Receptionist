@@ -104,11 +104,64 @@ class NotFoundError(TerminalError):
     http_status = 404
 
 
+class AuthenticationError(TerminalError):
+    """No valid credential was presented, or it has expired.
+
+    401, not 403: the caller may retry *with* a credential. Deliberately vague
+    in its message — "invalid or expired" rather than "no such user" or "wrong
+    token" — because distinguishing them tells an attacker which half to keep
+    working on, and confirms whether an email address has an account.
+    """
+
+    code = "unauthenticated"
+    http_status = 401
+
+
+class AuthorizationError(TerminalError):
+    """A valid credential that does not permit this action.
+
+    403. Used only where the caller is already known to be able to see that the
+    resource exists. When revealing existence is itself a leak — another
+    tenant's row — the correct answer is :class:`NotFoundError`, so that probing
+    for ids cannot distinguish "not yours" from "not there".
+    """
+
+    code = "forbidden"
+    http_status = 403
+
+
 class DryRunError(TerminalError):
     """A real side effect was attempted while ``DRY_RUN`` is enabled."""
 
     code = "dry_run_blocked"
     http_status = 409
+
+
+class BillingBlockedError(AppError):
+    """Provisioning stopped because the tenant is not entitled to it.
+
+    Deliberately neither :class:`RetryableError` nor :class:`TerminalError`.
+
+    Not terminal, because nothing is *broken*: the tenant simply has not paid,
+    and the moment they do the run should continue. Marking it terminal would
+    fail the run, trigger saga compensation, and release a number the customer
+    is about to be entitled to.
+
+    Not retryable in the ordinary sense either, because backing off and trying
+    again in five seconds will not make a card appear. The engine handles this
+    error specially — it *parks* the run in
+    :attr:`~app.models.enums.ProvisioningStatus.BILLING_BLOCKED` rather than
+    failing it, and a Stripe webhook granting entitlement un-parks it.
+
+    ``retryable`` is False so that no generic handler retries it into the
+    attempt budget that a genuine vendor timeout needs.
+    """
+
+    retryable = False
+    code = "billing_blocked"
+    #: 402, not 403. The caller is authenticated and permitted; what is missing
+    #: is payment, and a client can act on that distinction.
+    http_status = 402
 
 
 class VendorError(AppError):

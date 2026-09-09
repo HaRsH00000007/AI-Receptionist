@@ -25,7 +25,14 @@ from tests.db_fixtures import (
     resolve_test_database_url,
 )
 
+#: The full table inventory, written out rather than derived.
+#:
+#: Deliberately duplicated from the models: deriving it would make the test
+#: agree with whatever the code currently does, which is not a test. Adding a
+#: table is supposed to require an edit here, so that a table nobody meant to
+#: ship gets noticed in review.
 EXPECTED_TABLES = {
+    # ---- POC core ----
     "agent_configs",
     "agents",
     "business_profiles",
@@ -35,6 +42,24 @@ EXPECTED_TABLES = {
     "provisioning_steps",
     "tenants",
     "webhook_events",
+    # ---- M2: identity ----
+    "users",
+    "memberships",
+    "sessions",
+    # ---- M2: billing ----
+    "subscriptions",
+    "billing_events",
+    # ---- M2: usage metering ----
+    "usage_events",
+    "usage_daily",
+    # ---- M2: audit ----
+    "audit_logs",
+    # ---- M2: operations ----
+    "idempotency_keys",
+    "notifications",
+    "notification_attempts",
+    "recordings",
+    "data_deletion_requests",
 }
 
 

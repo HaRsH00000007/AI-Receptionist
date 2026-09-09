@@ -120,3 +120,64 @@ class PostCallEvent(ProviderModel):
             if message:
                 lines.append(f"{role}: {message}")
         return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Payments
+# ---------------------------------------------------------------------------
+class CustomerRef(ProviderModel):
+    """A billing customer at the processor.
+
+    Deliberately thin. Everything the application decides with — plan, status,
+    entitlement — lives in our ``subscriptions`` table; this is only the handle
+    needed to talk to Stripe about it.
+    """
+
+    customer_id: str
+    email: str | None = None
+
+
+class CheckoutSession(ProviderModel):
+    """A hosted checkout the customer is redirected to.
+
+    We never see card details: they go to Stripe's page, not ours, which keeps
+    the application out of PCI scope entirely.
+    """
+
+    session_id: str
+    url: str
+
+
+class BillingPortalSession(ProviderModel):
+    """A hosted portal for changing a card or cancelling."""
+
+    url: str
+
+
+class SubscriptionRef(ProviderModel):
+    """A subscription as the processor reports it.
+
+    ``status`` is the processor's own vocabulary — "trialing", "past_due" and so
+    on. It is mapped onto our :class:`~app.models.enums.SubscriptionStatus` in
+    the billing service, never used raw, so that a change to Stripe's status set
+    is an adapter concern rather than a business-logic one.
+    """
+
+    subscription_id: str
+    customer_id: str
+    status: str
+    price_id: str | None = None
+    current_period_start: int | None = None
+    current_period_end: int | None = None
+    trial_end: int | None = None
+    cancel_at_period_end: bool = False
+
+
+class PaymentEvent(ProviderModel):
+    """A verified webhook event from the processor."""
+
+    event_id: str
+    event_type: str
+    #: The already-parsed payload. The raw bytes stay in ``webhook_events`` for
+    #: replay; this is the shape the handler works with.
+    data: dict[str, Any] = Field(default_factory=dict)

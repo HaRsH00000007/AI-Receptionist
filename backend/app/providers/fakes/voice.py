@@ -12,7 +12,7 @@ import itertools
 from dataclasses import dataclass, field
 
 from app.core.errors import VendorError
-from app.providers.fakes.support import Behaviour
+from app.providers.fakes.support import Behaviour, instance_token
 from app.providers.models import AgentRef, PhoneNumberRef
 
 
@@ -56,6 +56,9 @@ class FakeElevenLabsProvider:
     behaviour: Behaviour = field(default_factory=Behaviour)
     agents: dict[str, _StoredAgent] = field(default_factory=dict)
     phones: dict[str, _StoredPhone] = field(default_factory=dict)
+    # Same reasoning as the Twilio fake: both of these land in UNIQUE
+    # columns, so they must survive a worker restart without colliding.
+    _token: str = field(default_factory=lambda: instance_token(8))
     _agent_counter: itertools.count[int] = field(default_factory=lambda: itertools.count(1))
     _phone_counter: itertools.count[int] = field(default_factory=lambda: itertools.count(1))
 
@@ -76,7 +79,7 @@ class FakeElevenLabsProvider:
             )
 
         agent = _StoredAgent(
-            agent_id=f"agent_{next(self._agent_counter):08d}",
+            agent_id=f"agent_{self._token}{next(self._agent_counter):08d}",
             name=name,
             voice_id=voice_id,
             system_prompt=system_prompt,
@@ -160,7 +163,7 @@ class FakeElevenLabsProvider:
                 return phone.to_ref()
 
         phone = _StoredPhone(
-            phone_id=f"phnum_{next(self._phone_counter):08d}", e164=e164, label=label
+            phone_id=f"phnum_{self._token}{next(self._phone_counter):08d}", e164=e164, label=label
         )
         self.phones[phone.phone_id] = phone
         return phone.to_ref()

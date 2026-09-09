@@ -18,8 +18,9 @@ from datetime import UTC, datetime
 
 from fastapi import APIRouter, Header, Query
 from sqlalchemy import select
+from temporalio.client import Client
 
-from app.api.deps import ProvidersDep, SettingsDep
+from app.api.deps import ProvidersDep, SettingsDep, TemporalClientDep
 from app.core.config import Settings
 from app.core.errors import AppError, NotFoundError
 from app.core.logging import get_logger
@@ -37,6 +38,7 @@ from app.models.enums import (
 from app.provisioning.compensation import compensate_run
 from app.schemas.views import ActionResult, RunSummaryView
 from app.services.idempotency import step_idempotency_key, tenant_resource_name
+from app.temporal.client import start_provisioning
 
 logger = get_logger(__name__)
 
@@ -109,6 +111,7 @@ async def retry_run(
     run_id: uuid.UUID,
     session: SessionDep,
     settings: SettingsDep,
+    temporal: TemporalClientDep,
     x_admin_key: str | None = Header(default=None),
     from_step: ProvisioningStep | None = Query(default=None),
 ) -> ActionResult:
@@ -169,10 +172,56 @@ async def retry_run(
 
     await session.commit()
 
+    if settings.uses_temporal:
+        # The previous execution has closed — it either failed or was
+        # compensated — so a fresh one is started against the same run id.
+        # Temporal rejects a duplicate id for a *running* execution, which is
+        # what stops an impatient operator clicking retry twice from producing
+        # two orchestrators over one run.
+        #
+        # The step rows were just reset above, so the new execution re-walks the
+        # sequence from the first step that is not SUCCEEDED. It cannot skip the
+        # money gate: `purchase_number` re-checks entitlement itself.
+        await _restart_workflow(temporal, settings, run, tenant)
+
     logger.info("run reset for retry", extra={"run_id": str(run.id), "steps_reset": len(reset)})
     return ActionResult(
         ok=True, detail=f"reset {len(reset)} step(s): {', '.join(reset) or 'none'}", run_id=run.id
     )
+
+
+async def _restart_workflow(
+    temporal: Client | None,
+    settings: Settings,
+    run: ProvisioningRun,
+    tenant: Tenant,
+) -> None:
+    """Start a new workflow execution for a reset run. Never fails the retry.
+
+    The database reset is the part that matters and has already committed. If
+    Temporal is unreachable the run is simply left eligible, and a later retry
+    starts it — which is better than a 500 that leaves the operator unsure
+    whether the reset happened.
+    """
+    if temporal is None:
+        logger.error(
+            "temporal is unavailable; the run was reset but not restarted",
+            extra={"run_id": str(run.id)},
+        )
+        return
+    try:
+        await start_provisioning(
+            temporal,
+            settings,
+            run_id=run.id,
+            tenant_id=tenant.id,
+            correlation_id=run.correlation_id,
+        )
+    except Exception:
+        logger.exception(
+            "could not restart the provisioning workflow",
+            extra={"run_id": str(run.id)},
+        )
 
 
 def _resume_status(run: ProvisioningRun) -> ProvisioningStatus:

@@ -118,28 +118,58 @@ export function submitSignup(payload: SignupRequest): Promise<SignupResponse> {
   });
 }
 
-export function getTenant(tenantId: string): Promise<TenantView> {
-  return request<TenantView>(`/api/v1/tenants/${tenantId}`);
+/**
+ * Tenant reads require a credential. The status page has no logged-in user --
+ * the business has just submitted a form -- so it carries the signed, expiring
+ * grant the signup response returned. A bare tenant id opens nothing.
+ */
+function withGrant(path: string, statusToken?: string): string {
+  if (!statusToken) return path;
+  const separator = path.includes("?") ? "&" : "?";
+  return `${path}${separator}status_token=${encodeURIComponent(statusToken)}`;
 }
 
-export function getProvisioning(tenantId: string): Promise<ProvisioningView> {
-  return request<ProvisioningView>(`/api/v1/tenants/${tenantId}/provisioning`);
+export function getTenant(
+  tenantId: string,
+  statusToken?: string,
+): Promise<TenantView> {
+  return request<TenantView>(withGrant(`/api/v1/tenants/${tenantId}`, statusToken));
 }
 
-export function getPhone(tenantId: string): Promise<PhoneNumberView> {
-  return request<PhoneNumberView>(`/api/v1/tenants/${tenantId}/phone`);
+export function getProvisioning(
+  tenantId: string,
+  statusToken?: string,
+): Promise<ProvisioningView> {
+  return request<ProvisioningView>(
+    withGrant(`/api/v1/tenants/${tenantId}/provisioning`, statusToken),
+  );
 }
 
-export function listCalls(tenantId: string): Promise<CallView[]> {
-  return request<CallView[]>(`/api/v1/tenants/${tenantId}/calls`);
+export function getPhone(
+  tenantId: string,
+  statusToken?: string,
+): Promise<PhoneNumberView> {
+  return request<PhoneNumberView>(
+    withGrant(`/api/v1/tenants/${tenantId}/phone`, statusToken),
+  );
+}
+
+export function listCalls(
+  tenantId: string,
+  statusToken?: string,
+): Promise<CallView[]> {
+  return request<CallView[]>(
+    withGrant(`/api/v1/tenants/${tenantId}/calls`, statusToken),
+  );
 }
 
 /** A 404 is an expected answer for the number before it is bought. */
 export async function getPhoneOrNull(
   tenantId: string,
+  statusToken?: string,
 ): Promise<PhoneNumberView | null> {
   try {
-    return await getPhone(tenantId);
+    return await getPhone(tenantId, statusToken);
   } catch (error) {
     if (error instanceof ApiError && error.status === 404) return null;
     throw error;

@@ -126,6 +126,7 @@ async def test_started_at_is_stamped_on_every_attempt(worker_env: WorkerEnv) -> 
 
     await worker_env.worker.tick()  # validate
     await worker_env.worker.tick()  # generate_config
+    await worker_env.worker.tick()  # billing_gate
     await worker_env.worker.tick()  # purchase attempt 1 -> fails
 
     first = (await load_steps(worker_env, run_id))[ProvisioningStep.PURCHASE_NUMBER]

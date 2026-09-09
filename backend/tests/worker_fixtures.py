@@ -22,6 +22,7 @@ from app.core.config import Settings
 from app.db.session import create_engine, create_session_factory
 from app.providers.fakes.llm import FakeLLMProvider
 from app.providers.fakes.mail import FakeEmailProvider
+from app.providers.fakes.payments import FakePaymentProvider
 from app.providers.fakes.telephony import FakeTwilioProvider
 from app.providers.fakes.voice import FakeElevenLabsProvider
 from app.providers.registry import Providers
@@ -32,6 +33,10 @@ from tests.support import build_settings
 #: dictate an ordering.
 _TABLES = (
     "webhook_events",
+    "billing_events",
+    "subscriptions",
+    "usage_events",
+    "notifications",
     "calls",
     "provisioning_steps",
     "provisioning_runs",
@@ -73,6 +78,11 @@ class WorkerEnv:
         return self.providers.email
 
     @property
+    def payments(self) -> FakePaymentProvider:
+        assert isinstance(self.providers.payments, FakePaymentProvider)
+        return self.providers.payments
+
+    @property
     def llm(self) -> FakeLLMProvider:
         assert isinstance(self.providers.llm, FakeLLMProvider)
         return self.providers.llm
@@ -98,6 +108,7 @@ def build_fake_providers() -> Providers:
         twilio=FakeTwilioProvider(),
         elevenlabs=FakeElevenLabsProvider(),
         email=FakeEmailProvider(),
+        payments=FakePaymentProvider(),
     )
 
 

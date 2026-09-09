@@ -1,7 +1,11 @@
 # ---- Secrets -------------------------------------------------------------
+# Real values never leave the machine. The *.example templates carry the
+# variable names and the reasoning, never a credential.
 .env
 .env.*
 !.env.example
+!.env.local.example
+!.env.test.example
 *.pem
 *.key
 

@@ -3,7 +3,22 @@
 The only irreversible, money-spending step in the run, so it is the one with the
 most machinery around it.
 
-Three guards, in order:
+**Guard 0 is the money gate**, and it is the reason this module cannot spend
+money for an unentitled tenant. ``BILLING_GATE`` already ran as its own step,
+but that is not sufficient on its own:
+
+* a step retry re-enters *this* function without re-running the previous step;
+* an admin "retry from step" can start the run here directly;
+* entitlement can change between the two steps — a card fails, a trial lapses,
+  a subscription is cancelled — and the run may have been parked for hours;
+* two workers can race, and only the check that happens in the same moment as
+  the spend is authoritative.
+
+So entitlement is re-read from PostgreSQL here, immediately before the vendor
+call, every time. The gate step gives visibility and a clean parked state; this
+check is the one that actually guarantees the money is safe.
+
+Then three idempotency guards, in order:
 
 1. **Our row.** An ACTIVE ``phone_numbers`` row for this tenant means the
    purchase already completed; return it.
@@ -33,6 +48,7 @@ from app.models import PhoneNumber
 from app.models.enums import PhoneNumberStatus
 from app.providers.models import AvailableNumber
 from app.provisioning.context import StepContext, StepResult
+from app.services.billing_gate import require_entitlement
 from app.services.idempotency import tenant_resource_name
 
 logger = get_logger(__name__)
@@ -65,6 +81,15 @@ async def run(ctx: StepContext) -> StepResult:
     tenant = ctx.tenant
     friendly_name = tenant_resource_name(tenant.id)
 
+    # Guard 0: the money gate. Re-read from the database rather than trusting
+    # the earlier BILLING_GATE step, because entitlement can have changed since
+    # it ran and a retry re-enters here without it. Raises BillingBlockedError,
+    # so nothing below executes and Twilio is never contacted.
+    #
+    # This deliberately runs before the adoption guards too: adopting a number
+    # is free, but it would move an unentitled tenant forward towards ACTIVE.
+    await require_entitlement(ctx.session, ctx.settings, tenant.id)
+
     # Guard 1: we already own one.
     active = await _active_number(ctx)
     if active is not None:
@@ -94,6 +119,12 @@ async def run(ctx: StepContext) -> StepResult:
     # Guard 3: durable intent, committed before any money is spent.
     record = await _upsert_pending(ctx, e164=candidate.e164)
     await ctx.session.commit()
+
+    # The last word before the charge. `_select_number` above performs vendor
+    # searches that can take seconds, and that commit ended the transaction the
+    # first check was read in -- so entitlement is confirmed once more, as close
+    # to the spend as it is possible to get.
+    await require_entitlement(ctx.session, ctx.settings, tenant.id)
 
     purchased = await ctx.providers.twilio.purchase_number(
         e164=candidate.e164, friendly_name=friendly_name

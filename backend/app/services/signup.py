@@ -14,6 +14,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import Settings
 from app.core.logging import get_logger
 from app.data.area_codes import timezone_for_area_code
 from app.models import BusinessProfile, ProvisioningRun, ProvisioningStepRecord, Tenant
@@ -25,6 +26,7 @@ from app.models.enums import (
 )
 from app.schemas.business import EscalationPolicy, dump_json_column
 from app.schemas.signup import SignupRequest
+from app.services.billing import BillingService
 from app.services.idempotency import step_idempotency_key
 from app.services.normalization import (
     normalize_area_code,
@@ -52,8 +54,12 @@ class SignupResult:
 class SignupService:
     """Creates the tenant and schedules its provisioning."""
 
-    def __init__(self, session: AsyncSession) -> None:
+    def __init__(self, session: AsyncSession, settings: Settings | None = None) -> None:
         self.session = session
+        # Optional so existing callers keep working; when absent the trial is
+        # not granted here and the money gate parks the run until billing says
+        # yes. Failing closed is the right default for a money decision.
+        self.settings = settings
 
     async def submit(self, request: SignupRequest, *, correlation_id: str) -> SignupResult:
         """Accept a signup, or return the existing one for this business.
@@ -106,6 +112,13 @@ class SignupService:
                 extra={"tenant_id": str(winner.id), "email": email},
             )
             return SignupResult(tenant=winner, run=await self._latest_run(winner), created=False)
+
+        # Granted after the tenant is durable and inside the same transaction,
+        # so a signup either produces a tenant *and* its entitlement or neither.
+        # A tenant with no subscription is parked by the money gate immediately,
+        # which is safe but indistinguishable from a bug.
+        if self.settings is not None:
+            await BillingService(self.session, self.settings).grant_trial(tenant)
 
         logger.info(
             "signup accepted",

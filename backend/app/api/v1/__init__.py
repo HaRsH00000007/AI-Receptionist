@@ -9,9 +9,12 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
-from app.api.v1 import admin, signups, tenants, webhooks
+from app.api.v1 import admin, auth, signups, tenants, webhooks
 
 router = APIRouter()
+# Auth first: it is the only unauthenticated group, and reading it first
+# makes the boundary between public and protected routes obvious.
+router.include_router(auth.router)
 router.include_router(signups.router)
 router.include_router(tenants.router)
 router.include_router(webhooks.router)

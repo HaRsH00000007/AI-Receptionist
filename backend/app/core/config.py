@@ -12,10 +12,13 @@ from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
-from typing import Literal, Self
+from typing import TYPE_CHECKING, Literal, Self
 
 from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+if TYPE_CHECKING:
+    from app.models.enums import TenantPlan
 
 _BACKEND_ROOT = Path(__file__).resolve().parents[2]
 _REPO_ROOT = _BACKEND_ROOT.parent
@@ -28,10 +31,35 @@ Environment = Literal["local", "test", "development", "staging", "production"]
 LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
 LogFormat = Literal["json", "console"]
 
-LLMProviderName = Literal["fake", "anthropic", "openai"]
+LLMProviderName = Literal["fake", "anthropic", "openai", "groq"]
+
+#: The stock model ids. They are Anthropic's because `anthropic` is the
+#: reference real provider; every other vendor publishes its own catalogue and
+#: therefore needs these set explicitly. Named here so a validator can tell
+#: "the operator chose this" from "nobody chose anything".
+DEFAULT_LLM_CONFIG_MODEL = "claude-opus-5"
+DEFAULT_LLM_SUMMARY_MODEL = "claude-haiku-4-5-20251001"
 TwilioProviderName = Literal["fake", "twilio"]
 ElevenLabsProviderName = Literal["fake", "elevenlabs"]
-EmailProviderName = Literal["fake", "resend", "sendgrid"]
+EmailProviderName = Literal["fake", "resend", "sendgrid", "smtp"]
+PaymentProviderName = Literal["fake", "stripe"]
+ObjectStorageProviderName = Literal["fake", "s3"]
+
+#: How provisioning is orchestrated.
+#:
+#: ``state_machine`` is the POC's polling worker; ``temporal`` is the production
+#: path. Both are kept deliberately: the flag is what lets Temporal be proven
+#: against the same test suite before the state machine is retired, rather than
+#: swapping orchestration and hoping (see docs/PRODUCTION_MIGRATION_PLAN.md M4).
+OrchestratorName = Literal["state_machine", "temporal"]
+
+#: Which ElevenLabs agent a tenant is served by.
+#:
+#: ``per_tenant`` is the POC shape — one vendor agent per customer.
+#: ``shared_vertical`` is the production shape — ~5 agents, one per business
+#: type, with per-call dynamic variables. Per-tenant so that tenants migrate in
+#: batches rather than all at once.
+AgentModeName = Literal["per_tenant", "shared_vertical"]
 
 
 class Settings(BaseSettings):
@@ -108,10 +136,16 @@ class Settings(BaseSettings):
     # ---- LLM -------------------------------------------------------------
     anthropic_api_key: SecretStr = SecretStr("")
     openai_api_key: SecretStr = SecretStr("")
+    #: Groq speaks OpenAI's chat-completions API, so it needs no client of its
+    #: own — only its own base URL and key. The base URL already carries the
+    #: ``/openai/v1`` prefix, which is why the adapter posts to
+    #: ``/chat/completions`` rather than ``/v1/chat/completions``.
+    groq_api_key: SecretStr = SecretStr("")
+    groq_api_base_url: str = "https://api.groq.com/openai/v1"
     #: Config generation is once per tenant and quality-critical → strong model.
-    llm_config_model: str = "claude-opus-5"
+    llm_config_model: str = DEFAULT_LLM_CONFIG_MODEL
     #: Summarization is per call and easy → small, fast model.
-    llm_summary_model: str = "claude-haiku-4-5-20251001"
+    llm_summary_model: str = DEFAULT_LLM_SUMMARY_MODEL
     llm_max_tokens: int = Field(default=4096, ge=256)
     #: Deterministic by default: the same form should produce the same config.
     llm_temperature: float = Field(default=0.0, ge=0.0, le=1.0)
@@ -145,6 +179,129 @@ class Settings(BaseSettings):
     #: Shared secret for /admin routes. Not an auth system — just enough that
     #: the retry and abandon actions are not open to the internet.
     admin_api_key: SecretStr = SecretStr("")
+
+    # ---- Orchestration ---------------------------------------------------
+    #: Which engine drives provisioning.
+    #:
+    #: Temporal since M4. The polling state machine is retained as a documented
+    #: fallback — it is the path the older tests prove, so a Temporal outage has
+    #: an answer that is not "provisioning is down" — but exactly one of the two
+    #: is authoritative at a time. `app.worker` refuses to claim provisioning
+    #: runs unless it is the chosen one, because two orchestrators over the same
+    #: runs could both buy a phone number.
+    orchestrator: OrchestratorName = "temporal"
+    #: Default agent topology for newly provisioned tenants. Existing tenants
+    #: keep whatever their own `tenants.agent_mode` column says.
+    default_agent_mode: AgentModeName = "per_tenant"
+
+    # ---- Redis -----------------------------------------------------------
+    # Redis is a performance and coordination layer, never the source of truth.
+    # Postgres answers the same questions, more slowly; every cache read has a
+    # database fallback. Losing Redis must degrade latency, not correctness.
+    redis_url: str = "redis://localhost:6379/0"
+    #: When false, every cache/lock/rate-limit helper takes its Postgres or
+    #: in-process fallback path. This is how the "Redis is down" test variant
+    #: runs, and how a deployment survives an ElastiCache failover.
+    redis_enabled: bool = False
+    redis_socket_timeout_s: float = Field(default=0.25, gt=0)
+    #: Deliberately short. Redis sits on the audible call path, where waiting
+    #: on a slow cache is worse than missing it and reading Postgres.
+    redis_connect_timeout_s: float = Field(default=0.25, gt=0)
+    #: TTLs, seconds. Keyed per use so a hot-config change and a dedupe window
+    #: are not accidentally coupled.
+    redis_number_lookup_ttl_s: int = Field(default=300, ge=1)
+    redis_config_cache_ttl_s: int = Field(default=600, ge=1)
+    redis_webhook_dedupe_ttl_s: int = Field(default=86_400, ge=1)
+    redis_provision_lock_ttl_s: int = Field(default=300, ge=1)
+
+    # ---- Temporal --------------------------------------------------------
+    temporal_address: str = "localhost:7233"
+    temporal_namespace: str = "default"
+    temporal_task_queue: str = "ai-receptionist"
+    #: Whole-workflow ceiling. Provisioning that has not finished in an hour is
+    #: not going to; it needs an operator, not another retry.
+    temporal_workflow_timeout_s: int = Field(default=3_600, ge=60)
+    #: Per-activity ceiling, sized for the slowest vendor call plus headroom.
+    temporal_activity_timeout_s: int = Field(default=120, ge=5)
+    temporal_tls_enabled: bool = False
+    #: Temporal Cloud uses mTLS. Local dev uses neither.
+    temporal_client_cert_path: str = ""
+    temporal_client_key_path: str = ""
+
+    # ---- Object storage --------------------------------------------------
+    # MinIO locally, S3 in AWS — the same S3 API behind one interface, so the
+    # move is an endpoint change rather than a code change.
+    object_storage_provider: ObjectStorageProviderName = "fake"
+    s3_endpoint_url: str = "http://localhost:9000"
+    s3_region: str = "us-east-1"
+    s3_bucket: str = "ai-receptionist"
+    s3_access_key_id: str = ""
+    s3_secret_access_key: SecretStr = SecretStr("")
+    #: MinIO needs path-style addressing; S3 prefers virtual-host style.
+    s3_use_path_style: bool = True
+
+    # ---- Billing ---------------------------------------------------------
+    payment_provider: PaymentProviderName = "fake"
+    stripe_secret_key: SecretStr = SecretStr("")
+    stripe_publishable_key: str = ""
+    stripe_webhook_secret: SecretStr = SecretStr("")
+    stripe_api_base_url: str = "https://api.stripe.com"
+    #: The money gate. When true, provisioning refuses to purchase a number
+    #: unless the tenant holds an active subscription or a granted trial. This
+    #: is the single largest commercial leak in the POC (docs/02_PLAN_
+    #: PRODUCTION.md s4), so it defaults to ON and must be disabled explicitly.
+    billing_gate_enabled: bool = True
+    #: Stripe price id -> plan, as "price_x:pro,price_y:enterprise".
+    #: Configured rather than inferred: price ids are account-specific and
+    #: differ between test and live mode. Use `stripe_price_plan_map`.
+    stripe_price_plans: str = ""
+    #: Days of trial granted at signup when no card is on file. Zero means a
+    #: card is required before any number is bought.
+    #: How often a run parked in BILLING_BLOCKED re-checks entitlement on its
+    #: own. The Stripe webhook un-parks it immediately; this is the fallback
+    #: for a webhook that is never delivered, so a paying customer is never
+    #: stranded by a missed delivery.
+    billing_recheck_interval_s: int = Field(default=300, ge=30)
+    trial_days: int = Field(default=14, ge=0)
+    trial_included_minutes: int = Field(default=60, ge=0)
+
+    # ---- Authentication --------------------------------------------------
+    #: Signing key for session cookies and magic-link tokens. Required in a
+    #: production-like environment; see `_production_hardening` below.
+    auth_secret_key: SecretStr = SecretStr("")
+    session_cookie_name: str = "ai_receptionist_session"
+    session_ttl_s: int = Field(default=1_209_600, ge=300)  # 14 days
+    #: Short by design: a magic link is a bearer credential sitting in an inbox.
+    magic_link_ttl_s: int = Field(default=900, ge=60)
+    #: Cookies are Secure everywhere except plain-HTTP local development.
+    session_cookie_secure: bool = True
+    session_cookie_samesite: Literal["lax", "strict", "none"] = "lax"
+    login_rate_limit: int = Field(default=5, ge=1)
+    login_rate_limit_window_s: int = Field(default=300, ge=1)
+
+    # ---- Observability ---------------------------------------------------
+    otel_enabled: bool = False
+    otel_service_name: str = "ai-receptionist-api"
+    otel_exporter_otlp_endpoint: str = "http://localhost:4317"
+    #: 1.0 locally so nothing is missed while developing; lowered in production
+    #: where the volume is real and the cost is per-span.
+    otel_traces_sample_ratio: float = Field(default=1.0, ge=0.0, le=1.0)
+
+    # ---- SMTP (local Mailpit) --------------------------------------------
+    # Mailpit accepts anything on 1025 and shows it in a web UI on 8025. It is
+    # how local development gets a real send/deliver/render loop without any
+    # risk of mailing an actual customer.
+    smtp_host: str = "localhost"
+    smtp_port: int = Field(default=1025, ge=1, le=65_535)
+    smtp_username: str = ""
+    smtp_password: SecretStr = SecretStr("")
+    smtp_use_tls: bool = False
+
+    # ---- Data retention --------------------------------------------------
+    #: Days a transcript is kept before the retention job removes it. Per-plan
+    #: overrides live in the database; this is the floor.
+    transcript_retention_days: int = Field(default=90, ge=1)
+    recording_retention_days: int = Field(default=30, ge=1)
 
     # ---- Public URLs -----------------------------------------------------
     #: Used in notification emails so a recipient can reach the status page.
@@ -209,6 +366,8 @@ class Settings(BaseSettings):
             missing.append("ANTHROPIC_API_KEY")
         if self.effective_llm_provider == "openai" and self._blank(self.openai_api_key):
             missing.append("OPENAI_API_KEY")
+        if self.effective_llm_provider == "groq" and self._blank(self.groq_api_key):
+            missing.append("GROQ_API_KEY")
         if self.effective_twilio_provider == "twilio" and (
             not self.twilio_account_sid or self._blank(self.twilio_auth_token)
         ):
@@ -221,9 +380,103 @@ class Settings(BaseSettings):
             missing.append("RESEND_API_KEY")
         if self.effective_email_provider == "sendgrid" and self._blank(self.sendgrid_api_key):
             missing.append("SENDGRID_API_KEY")
+        if self.effective_payment_provider == "stripe" and self._blank(self.stripe_secret_key):
+            missing.append("STRIPE_SECRET_KEY")
+        if self.effective_object_storage_provider == "s3" and (
+            not self.s3_access_key_id or self._blank(self.s3_secret_access_key)
+        ):
+            missing.append("S3_ACCESS_KEY_ID/S3_SECRET_ACCESS_KEY")
+        if self.effective_email_provider == "smtp" and not self.smtp_host:
+            missing.append("SMTP_HOST")
         if missing:
             raise ValueError(
                 f"missing credentials for the selected providers: {', '.join(missing)}"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _llm_models_match_the_selected_vendor(self) -> Self:
+        """A vendor-specific model id must be chosen explicitly.
+
+        The stock ids are Anthropic's. Pointing a different vendor at them
+        produces a 404 from that vendor — and it produces it *during*
+        provisioning, where a tenant is left mid-flight, rather than at boot
+        where it is a one-line fix. Same reasoning as the credential check
+        above: fail early and name the variable to set.
+
+        Only vendors with a genuinely different catalogue are checked. `openai`
+        is deliberately excluded: it has always required the operator to pick
+        an id, and adding a new failure mode to a provider this change is not
+        about would be a regression, not a fix.
+        """
+        if self.effective_llm_provider != "groq":
+            return self
+        unset = [
+            name
+            for name, value, default in (
+                ("LLM_CONFIG_MODEL", self.llm_config_model, DEFAULT_LLM_CONFIG_MODEL),
+                ("LLM_SUMMARY_MODEL", self.llm_summary_model, DEFAULT_LLM_SUMMARY_MODEL),
+            )
+            if value == default
+        ]
+        if unset:
+            raise ValueError(
+                "LLM_PROVIDER=groq needs Groq model ids: "
+                f"{', '.join(unset)} still hold the default Anthropic model. "
+                "Set them to models from https://console.groq.com/docs/models"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _temporal_tls_material_present(self) -> Self:
+        """mTLS needs both halves of the pair, or neither.
+
+        Temporal Cloud rejects a client presenting a certificate without its
+        key with an error that names neither, so the mismatch is caught here.
+        """
+        cert, key = self.temporal_client_cert_path, self.temporal_client_key_path
+        if bool(cert) != bool(key):
+            raise ValueError(
+                "TEMPORAL_CLIENT_CERT_PATH and TEMPORAL_CLIENT_KEY_PATH must be set together"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _production_hardening(self) -> Self:
+        """Refuse to boot a staging/production process with local defaults.
+
+        Every item here is something that is merely inconvenient locally and
+        genuinely dangerous in production: an open admin surface, unsigned
+        webhooks, a guessable session key, verbose debug output, or a billing
+        gate someone turned off to test something and forgot to turn back on.
+        Failing at startup makes the misconfiguration a deploy failure instead
+        of an incident.
+        """
+        if not self.is_production_like:
+            return self
+
+        problems: list[str] = []
+        if self.debug:
+            problems.append("DEBUG must be false")
+        if self._blank(self.auth_secret_key):
+            problems.append("AUTH_SECRET_KEY is required")
+        elif len(self.auth_secret_key.get_secret_value()) < 32:
+            problems.append("AUTH_SECRET_KEY must be at least 32 characters")
+        if self._blank(self.admin_api_key):
+            problems.append("ADMIN_API_KEY is required")
+        if self._blank(self.elevenlabs_webhook_secret):
+            problems.append("ELEVENLABS_WEBHOOK_SECRET is required")
+        if self.effective_payment_provider == "stripe" and self._blank(self.stripe_webhook_secret):
+            problems.append("STRIPE_WEBHOOK_SECRET is required when Stripe is enabled")
+        if not self.billing_gate_enabled:
+            problems.append("BILLING_GATE_ENABLED must not be disabled")
+        if not self.session_cookie_secure:
+            problems.append("SESSION_COOKIE_SECURE must be true")
+        if self.log_format != "json":
+            problems.append("LOG_FORMAT must be json so logs are machine-readable")
+        if problems:
+            raise ValueError(
+                f"unsafe configuration for environment={self.environment}: " + "; ".join(problems)
             )
         return self
 
@@ -275,6 +528,58 @@ class Settings(BaseSettings):
     @property
     def effective_email_provider(self) -> EmailProviderName:
         return "fake" if self.dry_run else self.email_provider
+
+    @property
+    def effective_payment_provider(self) -> PaymentProviderName:
+        """Stripe is a money mover, so DRY_RUN forces the fake.
+
+        Note that this is belt-and-braces: even the real adapter should only
+        ever hold a `sk_test_` key outside production. The gate exists so that
+        a mis-set key cannot be reached by a dry run at all.
+        """
+        return "fake" if self.dry_run else self.payment_provider
+
+    @property
+    def effective_object_storage_provider(self) -> ObjectStorageProviderName:
+        """Object storage does not spend money, but it does leave artifacts.
+
+        A dry run should not litter a real bucket with recordings, so it uses
+        the in-memory implementation like every other side effect.
+        """
+        return "fake" if self.dry_run else self.object_storage_provider
+
+    # ---- Derived infrastructure ------------------------------------------
+    @property
+    def stripe_price_plan_map(self) -> dict[str, TenantPlan]:
+        """`STRIPE_PRICE_PLANS` parsed into price id -> plan.
+
+        An unparseable or unknown plan name is skipped rather than raising: a
+        typo here must not stop the process booting, and an unmapped price
+        leaves a subscription's plan unchanged instead of downgrading it.
+        """
+        # Imported here, not at module scope: app.models imports Settings, so
+        # a top-level import would be a cycle.
+        from app.models.enums import TenantPlan
+
+        valid = {member.value: member for member in TenantPlan}
+        pairs: dict[str, TenantPlan] = {}
+        for entry in self.stripe_price_plans.split(","):
+            price, _, plan = entry.partition(":")
+            price, plan = price.strip(), plan.strip().lower()
+            if price and plan in valid:
+                pairs[price] = valid[plan]
+        return pairs
+
+    @property
+    def temporal_tls_material(self) -> tuple[str, str] | None:
+        """The mTLS pair, or None when connecting without client certificates."""
+        if self.temporal_client_cert_path and self.temporal_client_key_path:
+            return (self.temporal_client_cert_path, self.temporal_client_key_path)
+        return None
+
+    @property
+    def uses_temporal(self) -> bool:
+        return self.orchestrator == "temporal"
 
 
 @lru_cache(maxsize=1)

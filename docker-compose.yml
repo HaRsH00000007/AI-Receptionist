@@ -1,10 +1,47 @@
-# Local development dependencies only. Nothing here is used in deployment.
-#   docker compose up -d db
+# =============================================================================
+# Local production stack.
+#
+# This is not a "dev" compose file with a separate production topology living
+# somewhere else. It is the production architecture, bound to local
+# infrastructure: the same Postgres, the same Redis, the same Temporal, the
+# same S3 API and the same SMTP interface the deployed system uses. Moving to
+# AWS changes endpoints and credentials, not application code.
+#
+#   Local                      AWS
+#   -----------------------    ------------------------
+#   postgres (this file)   ->  RDS
+#   redis    (this file)   ->  ElastiCache
+#   temporal (this file)   ->  Temporal Cloud
+#   minio    (this file)   ->  S3
+#   mailpit  (this file)   ->  Resend / SendGrid / SES
+#
+# Usage
+#   docker compose up -d                 # infrastructure only (default profile)
+#   docker compose --profile app up -d   # infrastructure + api, worker, frontend
+#   docker compose down                  # stop, keep data
+#   docker compose down -v               # stop and destroy data
+#
+# Ports are deliberately non-default (55432, 56379, ...) because a native
+# Postgres or Redis install already holding the standard port produces a
+# confusing failure: Docker still reports the port as published, but
+# connections reach the other server and fail on authentication.
+# =============================================================================
+
+name: ai-receptionist
+
+x-restart: &restart
+  # "unless-stopped" rather than "always": a deliberate `docker compose stop`
+  # should stay stopped across a laptop reboot.
+  restart: unless-stopped
+
 services:
+  # ---------------------------------------------------------------------------
+  # PostgreSQL — the source of truth. Nothing else in this file is authoritative.
+  # ---------------------------------------------------------------------------
   db:
     image: postgres:16-alpine
     container_name: ai-receptionist-db
-    restart: unless-stopped
+    <<: *restart
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-receptionist}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-receptionist}
@@ -12,9 +49,12 @@ services:
       # Deterministic collation so index ordering matches CI and production.
       POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
     ports:
-      - "${POSTGRES_PORT:-5432}:5432"
+      - "${POSTGRES_PORT:-55432}:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
+      # Creates the test and Temporal databases on first boot. Idempotent —
+      # Postgres runs this only when the data directory is empty.
+      - ./infra/postgres/init:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-receptionist} -d ${POSTGRES_DB:-receptionist}"]
       interval: 5s
@@ -22,5 +62,255 @@ services:
       retries: 10
       start_period: 10s
 
+  # ---------------------------------------------------------------------------
+  # Redis — cache, locks, rate limiting, webhook dedupe. Never authoritative.
+  # ---------------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    container_name: ai-receptionist-redis
+    <<: *restart
+    # No persistence, on purpose. Redis holds nothing that cannot be recomputed
+    # from Postgres, and a local stack that survives `down -v` with a stale
+    # cache would hide exactly the bugs this architecture is designed to avoid.
+    command:
+      - redis-server
+      - --save
+      - ""
+      - --appendonly
+      - "no"
+      - --maxmemory
+      - 256mb
+      # Evict the least recently used key rather than start refusing writes:
+      # a full cache must degrade latency, never correctness.
+      - --maxmemory-policy
+      - allkeys-lru
+    ports:
+      - "${REDIS_PORT:-56379}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
+  # ---------------------------------------------------------------------------
+  # Temporal — workflow orchestration. Not a database, not a source of truth.
+  # ---------------------------------------------------------------------------
+  temporal:
+    image: temporalio/auto-setup:1.25.2
+    container_name: ai-receptionist-temporal
+    <<: *restart
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DB: postgres12
+      DB_PORT: 5432
+      POSTGRES_SEEDS: db
+      POSTGRES_USER: ${POSTGRES_USER:-receptionist}
+      POSTGRES_PWD: ${POSTGRES_PASSWORD:-receptionist}
+      # Its own databases, created by infra/postgres/init. Temporal's schema is
+      # its own concern and must never share a namespace with application
+      # tables — that separation is what makes Temporal Cloud a drop-in later.
+      DBNAME: temporal
+      VISIBILITY_DBNAME: temporal_visibility
+    ports:
+      - "${TEMPORAL_PORT:-7233}:7233"
+    healthcheck:
+      test: ["CMD", "temporal", "operator", "cluster", "health", "--address", "temporal:7233"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 40s
+
+  temporal-ui:
+    image: temporalio/ui:2.31.2
+    container_name: ai-receptionist-temporal-ui
+    <<: *restart
+    depends_on:
+      temporal:
+        condition: service_started
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_CORS_ORIGINS: http://localhost:3000
+    ports:
+      - "${TEMPORAL_UI_PORT:-8233}:8080"
+
+  # ---------------------------------------------------------------------------
+  # MinIO — S3-compatible object storage for recordings and exports.
+  # ---------------------------------------------------------------------------
+  minio:
+    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+    container_name: ai-receptionist-minio
+    <<: *restart
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${S3_ACCESS_KEY_ID:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${S3_SECRET_ACCESS_KEY:-minioadmin}
+    ports:
+      - "${MINIO_PORT:-9000}:9000"
+      - "${MINIO_CONSOLE_PORT:-9001}:9001"
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  # Creates the bucket and exits. Without this the first upload fails against a
+  # bucket nobody made, which reads as a credentials problem and is not one.
+  minio-init:
+    image: minio/mc:RELEASE.2025-04-16T18-13-26Z
+    container_name: ai-receptionist-minio-init
+    depends_on:
+      minio:
+        condition: service_healthy
+    restart: "no"
+    entrypoint:
+      - sh
+      - -c
+      - |
+        mc alias set local http://minio:9000 "${S3_ACCESS_KEY_ID:-minioadmin}" "${S3_SECRET_ACCESS_KEY:-minioadmin}" &&
+        mc mb --ignore-existing local/"${S3_BUCKET:-ai-receptionist}" &&
+        echo "bucket ${S3_BUCKET:-ai-receptionist} ready"
+
+  # ---------------------------------------------------------------------------
+  # Mailpit — accepts every message, delivers none. A real send/render loop
+  # with zero risk of mailing an actual customer.
+  # ---------------------------------------------------------------------------
+  mailpit:
+    image: axllent/mailpit:v1.22
+    container_name: ai-receptionist-mailpit
+    <<: *restart
+    environment:
+      MP_SMTP_AUTH_ACCEPT_ANY: "1"
+      MP_SMTP_AUTH_ALLOW_INSECURE: "1"
+      MP_MAX_MESSAGES: "5000"
+    ports:
+      - "${MAILPIT_SMTP_PORT:-1025}:1025"   # SMTP
+      - "${MAILPIT_UI_PORT:-8025}:8025"     # web UI
+    healthcheck:
+      test: ["CMD", "/mailpit", "readyz"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
+  # ---------------------------------------------------------------------------
+  # Application containers. Opt in with `--profile app`; the default stack is
+  # infrastructure only, because the usual local loop runs the API and the
+  # worker from a terminal with a debugger and a reloader attached.
+  # ---------------------------------------------------------------------------
+  api:
+    profiles: ["app"]
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      target: runtime
+    container_name: ai-receptionist-api
+    <<: *restart
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    env_file: [.env]
+    environment:
+      # Container-internal hostnames override whatever .env says for the host.
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-receptionist}:${POSTGRES_PASSWORD:-receptionist}@db:5432/${POSTGRES_DB:-receptionist}
+      REDIS_URL: redis://redis:6379/0
+      TEMPORAL_ADDRESS: temporal:7233
+      S3_ENDPOINT_URL: http://minio:9000
+      SMTP_HOST: mailpit
+      SMTP_PORT: "1025"
+    ports:
+      - "${API_PORT:-8000}:8000"
+    # SIGTERM reaches uvicorn directly so in-flight requests drain instead of
+    # being cut off at the 10s kill timeout.
+    stop_grace_period: 30s
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/healthz', timeout=3).status == 200 else 1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+
+  # The Temporal worker: hosts the provisioning workflow and its activities.
+  # This is the authoritative provisioning orchestrator (M4).
+  temporal-worker:
+    profiles: ["app"]
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      target: runtime
+    container_name: ai-receptionist-temporal-worker
+    <<: *restart
+    command: ["python", "-m", "app.temporal.worker"]
+    depends_on:
+      db:
+        condition: service_healthy
+      temporal:
+        condition: service_healthy
+    env_file: [.env]
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-receptionist}:${POSTGRES_PASSWORD:-receptionist}@db:5432/${POSTGRES_DB:-receptionist}
+      REDIS_URL: redis://redis:6379/0
+      TEMPORAL_ADDRESS: temporal:7233
+      S3_ENDPOINT_URL: http://minio:9000
+      SMTP_HOST: mailpit
+      SMTP_PORT: "1025"
+    # Long, so an in-flight activity finishes rather than being cut off
+    # mid-vendor-call — which is what leaves a purchase completed at Twilio with
+    # nothing recorded on our side.
+    stop_grace_period: 60s
+
+  # The polling worker. Under ORCHESTRATOR=temporal it no longer claims
+  # provisioning runs (see app/worker.py); it still drives post-call
+  # processing, which is queue work rather than orchestration.
+  worker:
+    profiles: ["app"]
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      target: runtime
+    container_name: ai-receptionist-worker
+    <<: *restart
+    command: ["python", "-m", "app.worker"]
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    env_file: [.env]
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-receptionist}:${POSTGRES_PASSWORD:-receptionist}@db:5432/${POSTGRES_DB:-receptionist}
+      REDIS_URL: redis://redis:6379/0
+      TEMPORAL_ADDRESS: temporal:7233
+      S3_ENDPOINT_URL: http://minio:9000
+      SMTP_HOST: mailpit
+      SMTP_PORT: "1025"
+    # Longer than the API: a worker mid-activity should finish it rather than
+    # leave a provisioning run to be recovered by the step timeout.
+    stop_grace_period: 60s
+
+  frontend:
+    profiles: ["app"]
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      target: runtime
+    container_name: ai-receptionist-frontend
+    <<: *restart
+    depends_on:
+      api:
+        condition: service_healthy
+    environment:
+      NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:8000}
+    ports:
+      - "${FRONTEND_PORT:-3000}:3000"
+
 volumes:
   postgres-data:
+  minio-data:

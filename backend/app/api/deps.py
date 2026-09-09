@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import Annotated
 
 from fastapi import Depends, Request
+from temporalio.client import Client
 
 from app.core.config import Settings
 from app.providers.registry import Providers
@@ -36,3 +37,17 @@ def get_providers_dep(request: Request) -> Providers:
 
 
 ProvidersDep = Annotated[Providers, Depends(get_providers_dep)]
+
+
+def get_temporal_client(request: Request) -> Client | None:
+    """The Temporal client, or ``None`` when unavailable.
+
+    Nullable on purpose. A Temporal outage degrades provisioning rather than
+    taking the API down, so every caller is forced by the type to decide what
+    happens when orchestration is unreachable.
+    """
+    client: Client | None = getattr(request.app.state, "temporal", None)
+    return client
+
+
+TemporalClientDep = Annotated["Client | None", Depends(get_temporal_client)]

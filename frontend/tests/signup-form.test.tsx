@@ -72,13 +72,18 @@ describe("SignupForm", () => {
       contact_email: "owner@sunsetsalon.example.com",
       timezone: "America/Los_Angeles",
       created: true,
+      status_token: "v1.grant.token",
     });
 
     render(<SignupForm />);
     fill();
     fireEvent.click(screen.getByRole("button", { name: /create my receptionist/i }));
 
-    await waitFor(() => expect(push).toHaveBeenCalledWith("/status/tenant-123"));
+    // The grant must travel with the redirect. Without it the status page has
+    // no credential and every read is refused.
+    await waitFor(() =>
+      expect(push).toHaveBeenCalledWith("/status/tenant-123?t=v1.grant.token"),
+    );
     expect(submit).toHaveBeenCalledWith(
       expect.objectContaining({
         business_name: "Sunset Salon",

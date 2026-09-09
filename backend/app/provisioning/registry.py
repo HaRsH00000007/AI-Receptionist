@@ -12,6 +12,7 @@ from app.models.enums import STEP_SEQUENCE, ProvisioningStep
 from app.provisioning.context import StepFunction
 from app.provisioning.steps import (
     activate,
+    billing_gate,
     create_agent,
     generate_config,
     link_number,
@@ -23,6 +24,7 @@ from app.provisioning.steps import (
 STEP_IMPLEMENTATIONS: dict[ProvisioningStep, StepFunction] = {
     ProvisioningStep.VALIDATE: validate.run,
     ProvisioningStep.GENERATE_CONFIG: generate_config.run,
+    ProvisioningStep.BILLING_GATE: billing_gate.run,
     ProvisioningStep.PURCHASE_NUMBER: purchase_number.run,
     ProvisioningStep.CREATE_AGENT: create_agent.run,
     ProvisioningStep.LINK_NUMBER: link_number.run,

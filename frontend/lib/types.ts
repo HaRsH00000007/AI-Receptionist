@@ -54,6 +54,15 @@ export interface SignupResponse {
   timezone: string;
   /** False when an existing live signup was returned instead of a new one. */
   created: boolean;
+  /**
+   * A signed, expiring grant for this tenant's status page.
+   *
+   * The business has no account yet, so this is what lets them watch
+   * provisioning without logging in. It replaces the earlier arrangement where
+   * the tenant UUID alone opened the page — a capability that never expired and
+   * leaked through Referer headers, history and screenshots.
+   */
+  status_token: string;
 }
 
 /** Mirrors `StepStatus` on the backend. */
@@ -78,14 +87,36 @@ export type ProvisioningStatus =
   | "draft"
   | "validated"
   | "config_generated"
+  | "billing_authorized"
   | "number_purchased"
   | "agent_created"
   | "number_linked"
   | "verified"
   | "active"
   | "failed"
+  /**
+   * Parked, not failed. The tenant is not entitled to provisioning yet —
+   * nothing is broken, and the run resumes the moment billing says yes.
+   */
+  | "billing_blocked"
   | "compensating"
   | "compensated";
+
+/**
+ * The minimum billing state the status page needs.
+ *
+ * `entitled` is computed server-side from the subscription row. The client
+ * never asserts it — a browser that could claim "paid" would walk straight
+ * through the money gate.
+ */
+export interface BillingView {
+  entitled: boolean;
+  plan: string | null;
+  status: string | null;
+  trial_ends_at: string | null;
+  /** Why provisioning is blocked, when it is. A stable code, not a sentence. */
+  reason: string | null;
+}
 
 export interface ProvisioningView {
   run_id: string;
@@ -101,6 +132,8 @@ export interface ProvisioningView {
   steps: StepView[];
   completed_steps: number;
   total_steps: number;
+  /** Present so a run parked on billing can explain itself. */
+  billing: BillingView | null;
 }
 
 export interface TenantView {
@@ -164,6 +197,7 @@ export function isTerminal(status: ProvisioningStatus): boolean {
 export const STEP_LABELS: Record<string, string> = {
   validate: "Validate the details",
   generate_config: "Write the receptionist's instructions",
+  billing_gate: "Confirm your subscription",
   purchase_number: "Buy a phone number",
   create_agent: "Create the voice agent",
   link_number: "Connect the number to the agent",

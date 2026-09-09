@@ -8,7 +8,13 @@
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { ApiError, getPhoneOrNull, submitSignup } from "@/lib/api";
+import {
+  ApiError,
+  getPhoneOrNull,
+  getTenant,
+  listCalls,
+  submitSignup,
+} from "@/lib/api";
 import type { SignupRequest } from "@/lib/types";
 
 const PAYLOAD: SignupRequest = {
@@ -128,5 +134,38 @@ describe("getPhoneOrNull", () => {
     });
 
     await expect(getPhoneOrNull("t-1")).rejects.toBeInstanceOf(ApiError);
+  });
+});
+
+describe("status grants", () => {
+  it("sends the grant so the tenant read is authorized", async () => {
+    const fetchMock = mockFetch(200, { id: "tenant-1", name: "Sunset Salon" });
+
+    await getTenant("tenant-1", "v1.abc.123.sig");
+
+    const [url] = fetchMock.mock.calls[0] as [string];
+    expect(url).toContain("status_token=v1.abc.123.sig");
+  });
+
+  it("url-encodes the grant", async () => {
+    // A signature is base64url, but the encoding is the client's job to get
+    // right rather than something to assume about the token's alphabet.
+    const fetchMock = mockFetch(200, []);
+
+    await listCalls("tenant-1", "a+b/c=d");
+
+    const [url] = fetchMock.mock.calls[0] as [string];
+    expect(url).toContain("status_token=a%2Bb%2Fc%3Dd");
+  });
+
+  it("omits the parameter entirely when there is no grant", async () => {
+    // The dashboard authenticates with a session cookie instead, so an empty
+    // status_token must not be sent -- the API would try to verify it and fail.
+    const fetchMock = mockFetch(200, { id: "tenant-1" });
+
+    await getTenant("tenant-1");
+
+    const [url] = fetchMock.mock.calls[0] as [string];
+    expect(url).not.toContain("status_token");
   });
 });

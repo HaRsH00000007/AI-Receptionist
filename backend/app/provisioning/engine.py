@@ -30,7 +30,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
 from app.core.correlation import reset_correlation_id, set_correlation_id
-from app.core.errors import AppError
+from app.core.errors import AppError, BillingBlockedError
 from app.core.logging import get_logger
 from app.models import ProvisioningRun, ProvisioningStepRecord, Tenant
 from app.models.enums import (
@@ -274,6 +274,15 @@ class ProvisioningEngine:
         record.error = message
         run.last_error = message
 
+        # A billing refusal is not a failure. Nothing is broken, nothing was
+        # half-done, and no compensation is owed -- the tenant simply has not
+        # paid yet. Failing the run here would release resources for a customer
+        # who is one card entry away from being entitled, so it is parked
+        # instead. Handled before the retry ladder so it never consumes the
+        # attempt budget a genuine vendor timeout needs.
+        if isinstance(exc, BillingBlockedError):
+            return await self._park_for_billing(session, run, record, message)
+
         retry = should_retry(
             exc, attempt=record.attempt, max_attempts=self.settings.provisioning_max_attempts
         )
@@ -314,6 +323,53 @@ class ProvisioningEngine:
 
         await self._after_terminal_failure(session, run, tenant, message)
         return ExecutionReport(run.id, record.step_name, "failed", run.status)
+
+    async def _park_for_billing(
+        self,
+        session: AsyncSession,
+        run: ProvisioningRun,
+        record: ProvisioningStepRecord,
+        message: str,
+    ) -> ExecutionReport:
+        """Park a run whose tenant is not entitled, ready to resume.
+
+        The step goes back to PENDING and the run to BILLING_BLOCKED — an
+        in-flight status, so the tenant keeps owning this run and a duplicate
+        signup cannot start a second one alongside it.
+
+        ``next_attempt_at`` is set to a slow poll rather than left null. The
+        Stripe webhook un-parks the run the moment entitlement is granted, and
+        that is the fast path — but a webhook that is never delivered must not
+        strand a paying customer forever, so the run also re-checks on its own.
+        Belt and braces, because the failure mode is a customer who paid and
+        never got a phone number.
+
+        The tenant's own status is deliberately left alone: it stays PENDING,
+        never ACTIVE (which would claim a working receptionist that does not
+        exist) and never FAILED (which would be untrue and would show the
+        customer an error for something they can fix by paying).
+        """
+        record.status = StepStatus.PENDING
+        # Not counted as an attempt: the run has not failed, and letting a long
+        # unpaid period exhaust the budget would turn "hasn't paid yet" into a
+        # permanent failure.
+        record.attempt = max(record.attempt - 1, 0)
+        run.status = ProvisioningStatus.BILLING_BLOCKED
+        run.next_attempt_at = datetime.now(UTC) + timedelta(
+            seconds=self.settings.billing_recheck_interval_s
+        )
+        await session.commit()
+
+        logger.warning(
+            "provisioning parked: tenant is not entitled",
+            extra={
+                "run_id": str(run.id),
+                "tenant_id": str(run.tenant_id),
+                "step": record.step_name.value,
+                "error": message,
+            },
+        )
+        return ExecutionReport(run.id, record.step_name, "billing_blocked", run.status)
 
     async def _after_terminal_failure(
         self, session: AsyncSession, run: ProvisioningRun, tenant: Tenant, reason: str

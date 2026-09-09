@@ -1,12 +1,17 @@
 """Tenant-scoped read endpoints.
 
-What the status page and the client dashboard poll. Every query filters by
-``tenant_id`` from the path — the isolation is in the query, not in a check that
-someone might forget to write.
+What the status page and the client dashboard poll.
 
-No authentication: the POC treats the tenant id as an unguessable capability
-(a v4 UUID). That is a documented POC decision, not an oversight — see the
-README's production roadmap, where this becomes magic-link auth.
+**Authorization.** Every route here depends on
+:data:`~app.api.auth_deps.TenantReadDep`, which grants access two ways: a
+logged-in session with an accepted membership, or a signed, expiring status
+grant for the post-signup page. It is a dependency rather than a check inside
+each handler so that a new endpoint added to this module cannot forget it.
+
+The POC accepted a bare tenant UUID as proof — the id in the URL *was* the
+credential. That is closed: the path id is now only ever a request, and
+``tenant_id`` in the handlers below is the one the dependency authorized. The
+two are compared by the dependency, never by the handler.
 """
 
 from __future__ import annotations
@@ -16,18 +21,22 @@ import uuid
 from fastapi import APIRouter, Query
 from sqlalchemy import select
 
+from app.api.auth_deps import TenantReadDep
+from app.api.deps import SettingsDep
 from app.core.errors import NotFoundError
 from app.db.session import SessionDep
 from app.models import Agent, AgentConfig, Call, PhoneNumber, ProvisioningRun, Tenant
 from app.models.enums import STEP_SEQUENCE, AgentStatus, PhoneNumberStatus, StepStatus
 from app.schemas.views import (
     AgentView,
+    BillingView,
     CallView,
     PhoneNumberView,
     ProvisioningView,
     StepView,
     TenantView,
 )
+from app.services.billing_gate import BillingDecision, evaluate
 
 router = APIRouter(prefix="/tenants", tags=["tenants"])
 
@@ -40,7 +49,7 @@ async def _load_tenant(session: SessionDep, tenant_id: uuid.UUID) -> Tenant:
 
 
 @router.get("/{tenant_id}", response_model=TenantView, summary="Tenant detail")
-async def get_tenant(tenant_id: uuid.UUID, session: SessionDep) -> TenantView:
+async def get_tenant(tenant_id: TenantReadDep, session: SessionDep) -> TenantView:
     tenant = await _load_tenant(session, tenant_id)
     return TenantView(
         id=tenant.id,
@@ -60,7 +69,9 @@ async def get_tenant(tenant_id: uuid.UUID, session: SessionDep) -> TenantView:
     response_model=ProvisioningView,
     summary="Provisioning state and per-step timeline",
 )
-async def get_provisioning(tenant_id: uuid.UUID, session: SessionDep) -> ProvisioningView:
+async def get_provisioning(
+    tenant_id: TenantReadDep, session: SessionDep, settings: SettingsDep
+) -> ProvisioningView:
     await _load_tenant(session, tenant_id)
 
     run = (
@@ -105,13 +116,29 @@ async def get_provisioning(tenant_id: uuid.UUID, session: SessionDep) -> Provisi
         steps=steps,
         completed_steps=sum(1 for step in steps if step.status is StepStatus.SUCCEEDED),
         total_steps=len(STEP_SEQUENCE),
+        # Evaluated server-side from the subscription row, through the same
+        # function the money gate uses -- so what the status page reports and
+        # what the gate decides can never disagree.
+        billing=_billing_view(await evaluate(session, settings, tenant_id)),
+    )
+
+
+def _billing_view(decision: BillingDecision) -> BillingView:
+    return BillingView(
+        entitled=decision.allowed,
+        plan=decision.plan.value if decision.plan else None,
+        status=decision.status.value if decision.status else None,
+        trial_ends_at=decision.trial_ends_at,
+        # Only surfaced on refusal: "entitled" needs no explanation, and the
+        # reason code is only actionable when something is blocked.
+        reason=None if decision.allowed else decision.reason,
     )
 
 
 @router.get(
     "/{tenant_id}/phone", response_model=PhoneNumberView, summary="The tenant's live number"
 )
-async def get_phone(tenant_id: uuid.UUID, session: SessionDep) -> PhoneNumberView:
+async def get_phone(tenant_id: TenantReadDep, session: SessionDep) -> PhoneNumberView:
     await _load_tenant(session, tenant_id)
     number = (
         await session.execute(
@@ -132,7 +159,7 @@ async def get_phone(tenant_id: uuid.UUID, session: SessionDep) -> PhoneNumberVie
 
 
 @router.get("/{tenant_id}/agent", response_model=AgentView, summary="The tenant's voice agent")
-async def get_agent(tenant_id: uuid.UUID, session: SessionDep) -> AgentView:
+async def get_agent(tenant_id: TenantReadDep, session: SessionDep) -> AgentView:
     await _load_tenant(session, tenant_id)
     agent = (
         await session.execute(
@@ -157,7 +184,7 @@ async def get_agent(tenant_id: uuid.UUID, session: SessionDep) -> AgentView:
 
 @router.get("/{tenant_id}/calls", response_model=list[CallView], summary="Recent calls")
 async def list_calls(
-    tenant_id: uuid.UUID,
+    tenant_id: TenantReadDep,
     session: SessionDep,
     limit: int = Query(default=25, ge=1, le=100),
 ) -> list[CallView]:

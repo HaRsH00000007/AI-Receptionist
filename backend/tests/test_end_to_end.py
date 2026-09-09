@@ -23,6 +23,7 @@ from app.models import AgentConfig, Call, PhoneNumber
 from app.models.enums import CallStatus, ProvisioningStatus, TenantStatus
 from app.services.signatures import build_elevenlabs_signature
 from app.worker import Worker
+from tests.support import grant
 
 SIGNUP: dict[str, Any] = {
     "business_name": "Sunset Salon",
@@ -57,16 +58,26 @@ async def test_the_whole_poc_runs_end_to_end(api_client: AsyncClient, api_app: F
     for _ in range(12):
         await worker.tick()
 
-    provisioning = (await api_client.get(f"/api/v1/tenants/{tenant_id}/provisioning")).json()
+    provisioning = (
+        await api_client.get(
+            f"/api/v1/tenants/{tenant_id}/provisioning", params=grant(api_app, tenant_id)
+        )
+    ).json()
     assert provisioning["status"] == ProvisioningStatus.ACTIVE.value
-    assert provisioning["completed_steps"] == 7
+    assert provisioning["completed_steps"] == 8
 
-    tenant = (await api_client.get(f"/api/v1/tenants/{tenant_id}")).json()
+    tenant = (
+        await api_client.get(f"/api/v1/tenants/{tenant_id}", params=grant(api_app, tenant_id))
+    ).json()
     assert tenant["status"] == TenantStatus.ACTIVE.value
 
     # ---- 3. A number was bought and an agent created ---------------------
-    phone = (await api_client.get(f"/api/v1/tenants/{tenant_id}/phone")).json()
-    agent = (await api_client.get(f"/api/v1/tenants/{tenant_id}/agent")).json()
+    phone = (
+        await api_client.get(f"/api/v1/tenants/{tenant_id}/phone", params=grant(api_app, tenant_id))
+    ).json()
+    agent = (
+        await api_client.get(f"/api/v1/tenants/{tenant_id}/agent", params=grant(api_app, tenant_id))
+    ).json()
 
     assert phone["e164"].startswith("+1805")  # the area code that was asked for
     assert agent["elevenlabs_agent_id"]
@@ -136,7 +147,9 @@ async def test_the_whole_poc_runs_end_to_end(api_client: AsyncClient, api_app: F
     for _ in range(4):
         await worker.tick()
 
-    calls = (await api_client.get(f"/api/v1/tenants/{tenant_id}/calls")).json()
+    calls = (
+        await api_client.get(f"/api/v1/tenants/{tenant_id}/calls", params=grant(api_app, tenant_id))
+    ).json()
     assert len(calls) == 1
     assert calls[0]["status"] == CallStatus.NOTIFIED.value
     assert calls[0]["summary"]
@@ -242,11 +255,17 @@ async def test_a_failed_run_leaves_nothing_billing(
     for _ in range(15):
         await worker.tick()
 
-    provisioning = (await api_client.get(f"/api/v1/tenants/{tenant_id}/provisioning")).json()
+    provisioning = (
+        await api_client.get(
+            f"/api/v1/tenants/{tenant_id}/provisioning", params=grant(api_app, tenant_id)
+        )
+    ).json()
     assert provisioning["status"] == ProvisioningStatus.COMPENSATED.value
     assert provisioning["last_error"]
 
-    tenant = (await api_client.get(f"/api/v1/tenants/{tenant_id}")).json()
+    tenant = (
+        await api_client.get(f"/api/v1/tenants/{tenant_id}", params=grant(api_app, tenant_id))
+    ).json()
     assert tenant["status"] == TenantStatus.ABANDONED.value
 
     # Nothing left at the vendor, so nothing left billing.

@@ -31,7 +31,33 @@ interface Snapshot {
   calls: CallView[];
 }
 
-export function StatusView({ tenantId }: { tenantId: string }) {
+/**
+ * Reason codes from the billing gate, rendered for a person.
+ *
+ * The API returns a stable code rather than a sentence, so wording can change
+ * here without a backend deploy — and an unrecognised code falls back to
+ * something honest rather than showing the customer a raw identifier.
+ */
+const BILLING_REASONS: Record<string, string> = {
+  no_active_subscription:
+    "Your subscription is not active yet. Complete checkout to continue.",
+  trial_expired:
+    "Your free trial has ended. Add a payment method to continue setup.",
+  subscription_not_entitled:
+    "Your subscription is not active. Update your billing details to continue.",
+};
+
+export function StatusView({
+  tenantId,
+  statusToken,
+}: {
+  tenantId: string;
+  /**
+   * The signed grant from the signup response. Without it the API refuses the
+   * read -- a tenant id on its own is not a credential.
+   */
+  statusToken?: string;
+}) {
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
   const [error, setError] = useState<ApiError | null>(null);
 
@@ -51,10 +77,10 @@ export function StatusView({ tenantId }: { tenantId: string }) {
     async function refresh() {
       try {
         const [tenant, provisioning, phone, calls] = await Promise.all([
-          getTenant(tenantId),
-          getProvisioning(tenantId),
-          getPhoneOrNull(tenantId),
-          listCalls(tenantId),
+          getTenant(tenantId, statusToken),
+          getProvisioning(tenantId, statusToken),
+          getPhoneOrNull(tenantId, statusToken),
+          listCalls(tenantId, statusToken),
         ]);
         if (cancelled) return;
         setSnapshot({ tenant, provisioning, phone, calls });
@@ -80,7 +106,7 @@ export function StatusView({ tenantId }: { tenantId: string }) {
       cancelled = true;
       clearInterval(timer);
     };
-  }, [tenantId, settled]);
+  }, [tenantId, statusToken, settled]);
 
   if (error && !snapshot) {
     return (
@@ -111,6 +137,10 @@ export function StatusView({ tenantId }: { tenantId: string }) {
   const { tenant, provisioning, phone, calls } = snapshot;
   const active = provisioning.status === "active";
   const failed = provisioning.status === "failed" || provisioning.status === "compensated";
+  // Deliberately not folded into `failed`. Nothing is broken — the customer has
+  // something to do, and showing them an error for it would be both wrong and
+  // a support ticket.
+  const awaitingBilling = provisioning.status === "billing_blocked";
   const percent = Math.round(
     (provisioning.completed_steps / Math.max(provisioning.total_steps, 1)) * 100,
   );
@@ -126,6 +156,20 @@ export function StatusView({ tenantId }: { tenantId: string }) {
         </div>
         <RunBadge active={active} failed={failed} />
       </section>
+
+      {awaitingBilling && (
+        <section className="rounded-xl border border-line bg-surface p-6">
+          <p className="text-sm font-medium">Waiting for your subscription</p>
+          <p className="mt-2 text-sm text-muted">
+            {BILLING_REASONS[provisioning.billing?.reason ?? ""] ??
+              "We need an active subscription before setting up your number."}
+          </p>
+          <p className="mt-2 text-sm text-muted">
+            Setup continues automatically once payment is confirmed — there is
+            nothing to resubmit.
+          </p>
+        </section>
+      )}
 
       {active && phone && (
         <section className="rounded-xl border border-success-line bg-success-soft p-6">

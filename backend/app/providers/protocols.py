@@ -17,11 +17,16 @@ from typing import Protocol, runtime_checkable
 from app.providers.models import (
     AgentRef,
     AvailableNumber,
+    BillingPortalSession,
+    CheckoutSession,
+    CustomerRef,
     EmailMessage,
     EmailResult,
     LLMResponse,
+    PaymentEvent,
     PhoneNumberRef,
     PurchasedNumber,
+    SubscriptionRef,
 )
 
 
@@ -132,3 +137,64 @@ class EmailProvider(Protocol):
     name: str
 
     async def send(self, message: EmailMessage) -> EmailResult: ...
+
+
+@runtime_checkable
+class PaymentProvider(Protocol):
+    """Billing. Stripe in production, a fake everywhere else.
+
+    Note what is *absent*: there is no ``charge`` and no ``create_subscription``
+    that takes a card. Payment is collected through the processor's hosted
+    checkout, so card details never touch this application and it stays out of
+    PCI scope. The application's job is to read back what the processor decided
+    and record it.
+
+    This provider is never asked whether a tenant is entitled. That question is
+    answered from our own ``subscriptions`` table by
+    :mod:`app.services.billing_gate`, because a Stripe outage must not be able
+    to decide that every customer is unpaid.
+    """
+
+    name: str
+
+    async def ensure_customer(self, *, tenant_id: str, email: str, name: str) -> CustomerRef:
+        """Find or create the billing customer for a tenant.
+
+        Idempotent by ``tenant_id``: called on every checkout, and must not
+        create a second customer for a tenant that already has one.
+        """
+        ...
+
+    async def create_checkout_session(
+        self,
+        *,
+        customer_id: str,
+        price_id: str,
+        success_url: str,
+        cancel_url: str,
+        idempotency_key: str,
+    ) -> CheckoutSession: ...
+
+    async def create_billing_portal_session(
+        self, *, customer_id: str, return_url: str
+    ) -> BillingPortalSession: ...
+
+    async def get_subscription(self, *, subscription_id: str) -> SubscriptionRef | None: ...
+
+    async def cancel_subscription(
+        self, *, subscription_id: str, at_period_end: bool = True
+    ) -> SubscriptionRef:
+        """Cancel. Defaults to period end — the customer paid for the period."""
+        ...
+
+    def verify_webhook(self, *, payload: bytes, signature: str) -> PaymentEvent:
+        """Verify a webhook signature and return the parsed event.
+
+        Synchronous because it is pure computation over bytes we already hold —
+        no network. Raises :class:`~app.core.errors.InvalidInputError` on a bad
+        signature, a missing one, or a timestamp outside the replay window.
+
+        This is the security boundary for billing state: without it, an
+        unauthenticated POST could grant any tenant a subscription.
+        """
+        ...

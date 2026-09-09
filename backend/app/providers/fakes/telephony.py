@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 
 from app.core.errors import VendorError
 from app.data.area_codes import area_codes_for_region
-from app.providers.fakes.support import Behaviour
+from app.providers.fakes.support import Behaviour, instance_token
 from app.providers.models import AvailableNumber, PurchasedNumber
 
 #: Area codes the fake pretends to have inventory in. Anything else searches
@@ -34,6 +34,9 @@ class FakeTwilioProvider:
     behaviour: Behaviour = field(default_factory=Behaviour)
     purchased: dict[str, PurchasedNumber] = field(default_factory=dict)
     released: set[str] = field(default_factory=set)
+    #: 24 hex of instance token + 8 of counter = the 32 characters a real
+    #: Twilio SID carries after its ``PN`` prefix.
+    _token: str = field(default_factory=lambda: instance_token(24))
     _sid_counter: itertools.count[int] = field(default_factory=lambda: itertools.count(1))
 
     # ---- search ----------------------------------------------------------
@@ -99,7 +102,7 @@ class FakeTwilioProvider:
             )
 
         number = PurchasedNumber(
-            sid=f"PN{next(self._sid_counter):032d}",
+            sid=f"PN{self._token}{next(self._sid_counter):08d}",
             e164=e164,
             friendly_name=friendly_name,
         )

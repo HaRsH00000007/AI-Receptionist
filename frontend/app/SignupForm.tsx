@@ -53,7 +53,11 @@ export function SignupForm() {
     setError(null);
     try {
       const result = await submitSignup(values);
-      router.push(`/status/${result.tenant_id}`);
+      // The grant travels with the redirect; without it the status page
+      // cannot read anything.
+      router.push(
+        `/status/${result.tenant_id}?t=${encodeURIComponent(result.status_token)}`,
+      );
     } catch (caught) {
       setError(
         caught instanceof ApiError

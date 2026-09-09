@@ -9,21 +9,45 @@ from __future__ import annotations
 
 from app.models.agent import Agent
 from app.models.agent_config import AgentConfig
+from app.models.audit import AuditLog
+from app.models.billing import BillingEvent, Subscription
 from app.models.business_profile import BusinessProfile
 from app.models.call import Call
+from app.models.identity import Membership, Session, User
+from app.models.operations import (
+    DataDeletionRequest,
+    IdempotencyKey,
+    Notification,
+    NotificationAttempt,
+    Recording,
+)
 from app.models.phone_number import PhoneNumber
 from app.models.provisioning import ProvisioningRun, ProvisioningStepRecord
 from app.models.tenant import Tenant
+from app.models.usage import UsageDaily, UsageEvent
 from app.models.webhook_event import WebhookEvent
 
 __all__ = [
     "Agent",
     "AgentConfig",
+    "AuditLog",
+    "BillingEvent",
     "BusinessProfile",
     "Call",
+    "DataDeletionRequest",
+    "IdempotencyKey",
+    "Membership",
+    "Notification",
+    "NotificationAttempt",
     "PhoneNumber",
     "ProvisioningRun",
     "ProvisioningStepRecord",
+    "Recording",
+    "Session",
+    "Subscription",
     "Tenant",
+    "UsageDaily",
+    "UsageEvent",
+    "User",
     "WebhookEvent",
 ]

@@ -92,6 +92,14 @@ class SignupResponse(BaseModel):
     #: tenant was created. The response is otherwise identical, which is what
     #: makes submitting the form twice safe.
     created: bool
+    #: A signed, expiring grant for this tenant's status page.
+    #:
+    #: The business has no account yet, so this is what lets them watch
+    #: provisioning without logging in. It replaces the POC's arrangement, where
+    #: the tenant UUID itself was the credential — a capability that never
+    #: expired, could not be revoked, and leaked through Referer headers,
+    #: browser history and screenshots.
+    status_token: str
 
 
 class SignupAcceptedHeaders(BaseModel):

@@ -14,14 +14,17 @@ from typing import Any
 
 from fastapi import APIRouter, Request, Response, status
 
-from app.api.deps import SettingsDep
+from app.api.deps import SettingsDep, TemporalClientDep
+from app.core.config import Settings
 from app.core.correlation import get_correlation_id, new_correlation_id
 from app.core.errors import InvalidInputError
 from app.core.logging import get_logger
 from app.db.session import SessionDep
 from app.schemas.signup import SignupRequest, SignupResponse, TallyWebhook
-from app.services.signup import SignupService
+from app.services.signup import SignupResult, SignupService
+from app.services.status_tokens import issue_status_token
 from app.services.tally import tally_to_signup
+from app.temporal.client import start_provisioning
 
 logger = get_logger(__name__)
 
@@ -41,11 +44,19 @@ async def _submit(
     request: Request,
     response: Response,
     session: SessionDep,
+    settings: Settings,
+    temporal: TemporalClientDep,
 ) -> SignupResponse:
     request.app.state.signup_limiter.check(_client_key(request))
 
     correlation_id = get_correlation_id() or new_correlation_id()
-    result = await SignupService(session).submit(payload, correlation_id=correlation_id)
+    result = await SignupService(session, settings).submit(payload, correlation_id=correlation_id)
+
+    if settings.uses_temporal:
+        # Committed first: the workflow's activities read this run, so starting
+        # before the commit would race a worker against an uncommitted row.
+        await session.commit()
+        await _start_workflow(temporal, settings, result)
 
     # 201 for a new tenant, 200 when an existing live signup was returned. Both
     # carry the same body, so a client that resubmits needs no special handling.
@@ -61,7 +72,48 @@ async def _submit(
         contact_email=result.tenant.contact_email,
         timezone=result.tenant.timezone,
         created=result.created,
+        status_token=issue_status_token(settings, result.tenant.id),
     )
+
+
+async def _start_workflow(
+    temporal: TemporalClientDep,
+    settings: Settings,
+    result: SignupResult,
+) -> None:
+    """Hand the run to Temporal. Never fails the signup.
+
+    Two independent reasons this is best-effort. The workflow id is derived from
+    the run id, so a resubmitted signup adopts the existing execution rather
+    than starting a second one — starting twice is already harmless. And a
+    Temporal outage must not break the front door: the POC's defining property
+    is that signup records a tenant in milliseconds and never calls a provider,
+    which is what keeps the form up when something downstream is down.
+
+    The cost is that a run whose workflow never started sits in DRAFT until an
+    operator retries it. That is visible in the admin panel and is the honest
+    trade against failing signups outright.
+    """
+    if temporal is None:
+        logger.error(
+            "temporal is unavailable; provisioning was not started",
+            extra={"tenant_id": str(result.tenant.id), "run_id": str(result.run.id)},
+        )
+        return
+
+    try:
+        await start_provisioning(
+            temporal,
+            settings,
+            run_id=result.run.id,
+            tenant_id=result.tenant.id,
+            correlation_id=result.run.correlation_id,
+        )
+    except Exception:
+        logger.exception(
+            "could not start the provisioning workflow",
+            extra={"tenant_id": str(result.tenant.id), "run_id": str(result.run.id)},
+        )
 
 
 @router.post(
@@ -76,8 +128,10 @@ async def create_signup(
     request: Request,
     response: Response,
     session: SessionDep,
+    settings: SettingsDep,
+    temporal: TemporalClientDep,
 ) -> SignupResponse:
-    return await _submit(payload, request, response, session)
+    return await _submit(payload, request, response, session, settings, temporal)
 
 
 @router.post(
@@ -92,6 +146,7 @@ async def create_signup_from_tally(
     response: Response,
     session: SessionDep,
     settings: SettingsDep,
+    temporal: TemporalClientDep,
 ) -> SignupResponse:
     """Adapter for the existing Tally form.
 
@@ -107,4 +162,4 @@ async def create_signup_from_tally(
     webhook = TallyWebhook.model_validate(payload)
     signup = tally_to_signup(webhook)
     logger.info("tally submission accepted", extra={"event_id": webhook.eventId})
-    return await _submit(signup, request, response, session)
+    return await _submit(signup, request, response, session, settings, temporal)

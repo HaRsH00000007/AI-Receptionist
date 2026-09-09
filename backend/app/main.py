@@ -61,6 +61,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # building them here means a misconfigured credential surfaces at
         # startup rather than on the first operator click.
         app.state.providers = build_providers(settings)
+
+        # Connected lazily and tolerantly. A Temporal outage must not stop the
+        # API booting: signup still records a tenant, the status page still
+        # answers, and only the *starting* of new workflows degrades. Handlers
+        # check for None rather than assuming a client.
+        app.state.temporal = None
+        if settings.uses_temporal:
+            try:
+                from app.temporal.client import connect
+
+                app.state.temporal = await connect(settings)
+            except Exception:
+                logger.exception(
+                    "could not connect to temporal; provisioning will be degraded",
+                    extra={"address": settings.temporal_address},
+                )
+
         try:
             yield
         finally:
@@ -85,6 +102,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # signup eventually spends money, so the form is never left ungated.
     app.state.signup_limiter = SlidingWindowLimiter(
         limit=settings.signup_rate_limit, window_s=settings.signup_rate_limit_window_s
+    )
+    # Login attempts are limited separately and far more tightly. A magic-link
+    # request costs an email and hands out a credential, so an unthrottled form
+    # is both a spam relay and a brute-force surface. Keyed on address+source
+    # (see app.api.v1.auth) so one attacker cannot lock a real customer out.
+    app.state.login_limiter = SlidingWindowLimiter(
+        limit=settings.login_rate_limit, window_s=settings.login_rate_limit_window_s
     )
 
     # Outermost middleware wins the response header, so correlation is added

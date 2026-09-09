@@ -25,6 +25,11 @@ def test_sequence_matches_the_plan() -> None:
     assert STEP_SEQUENCE == (
         ProvisioningStep.VALIDATE,
         ProvisioningStep.GENERATE_CONFIG,
+        # The money gate sits immediately before the only step that spends
+        # money. That adjacency is a money-safety property, not an ordering
+        # preference -- anything inserted between them widens the window in
+        # which entitlement can change unnoticed.
+        ProvisioningStep.BILLING_GATE,
         ProvisioningStep.PURCHASE_NUMBER,
         ProvisioningStep.CREATE_AGENT,
         ProvisioningStep.LINK_NUMBER,

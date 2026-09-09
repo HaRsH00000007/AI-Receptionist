@@ -13,12 +13,14 @@ from app.core.config import Settings
 from app.core.logging import get_logger
 from app.providers.fakes.llm import FakeLLMProvider
 from app.providers.fakes.mail import FakeEmailProvider
+from app.providers.fakes.payments import FakePaymentProvider
 from app.providers.fakes.telephony import FakeTwilioProvider
 from app.providers.fakes.voice import FakeElevenLabsProvider
 from app.providers.protocols import (
     ElevenLabsProvider,
     EmailProvider,
     LLMProvider,
+    PaymentProvider,
     TwilioProvider,
 )
 
@@ -33,10 +35,11 @@ class Providers:
     twilio: TwilioProvider
     elevenlabs: ElevenLabsProvider
     email: EmailProvider
+    payments: PaymentProvider
 
     async def aclose(self) -> None:
         """Close any adapter holding an HTTP connection pool."""
-        for provider in (self.llm, self.twilio, self.elevenlabs, self.email):
+        for provider in (self.llm, self.twilio, self.elevenlabs, self.email, self.payments):
             closer = getattr(provider, "aclose", None)
             if closer is not None:
                 await closer()
@@ -54,6 +57,7 @@ def build_providers(settings: Settings) -> Providers:
         twilio=_build_twilio(settings),
         elevenlabs=_build_elevenlabs(settings),
         email=_build_email(settings),
+        payments=_build_payments(settings),
     )
     logger.info(
         "providers resolved",
@@ -63,6 +67,7 @@ def build_providers(settings: Settings) -> Providers:
             "twilio": providers.twilio.name,
             "elevenlabs": providers.elevenlabs.name,
             "email": providers.email.name,
+            "payments": providers.payments.name,
         },
     )
     return providers
@@ -78,7 +83,14 @@ def _build_llm(settings: Settings) -> LLMProvider:
             from app.providers.real.llm import OpenAIProvider
 
             return OpenAIProvider(settings)
+        case "groq":
+            from app.providers.real.llm import GroqProvider
+
+            return GroqProvider(settings)
         case _:
+            # Only "fake" reaches this. An unknown name is refused earlier, by
+            # the `LLMProviderName` literal on the setting, so a typo is a
+            # startup error rather than a silent downgrade to the fake.
             return FakeLLMProvider()
 
 
@@ -96,6 +108,19 @@ def _build_elevenlabs(settings: Settings) -> ElevenLabsProvider:
 
         return ElevenLabsRestProvider(settings)
     return FakeElevenLabsProvider()
+
+
+def _build_payments(settings: Settings) -> PaymentProvider:
+    """Stripe, or the fake.
+
+    DRY_RUN forces the fake through `effective_payment_provider`, so a dry run
+    cannot create a subscription or a charge even with a live key configured.
+    """
+    if settings.effective_payment_provider == "stripe":
+        from app.providers.real.payments import StripeProvider
+
+        return StripeProvider(settings)
+    return FakePaymentProvider()
 
 
 def _build_email(settings: Settings) -> EmailProvider:

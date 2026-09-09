@@ -59,9 +59,15 @@ SIGNUP = {
 
 
 async def create_signup(env: WorkerEnv, **overrides: object) -> tuple[uuid.UUID, uuid.UUID]:
-    """Create a tenant through the real signup service. Returns (tenant, run)."""
+    """Create a tenant through the real signup service. Returns (tenant, run).
+
+    ``env.settings`` is passed so the tenant is granted its trial, which is what
+    the money gate then authorizes. Without it every run here would park in
+    BILLING_BLOCKED -- correct behaviour, but not the path these tests are about.
+    The gate itself is covered in test_billing_gate.py.
+    """
     async with env.session_factory() as session:
-        result = await SignupService(session).submit(
+        result = await SignupService(session, env.settings).submit(
             SignupRequest.model_validate({**SIGNUP, **overrides}),
             correlation_id=uuid.uuid4().hex,
         )
@@ -143,6 +149,7 @@ async def test_the_run_visits_every_status_in_order(worker_env: WorkerEnv) -> No
     assert seen == [
         ProvisioningStatus.VALIDATED,
         ProvisioningStatus.CONFIG_GENERATED,
+        ProvisioningStatus.BILLING_AUTHORIZED,
         ProvisioningStatus.NUMBER_PURCHASED,
         ProvisioningStatus.AGENT_CREATED,
         ProvisioningStatus.NUMBER_LINKED,
@@ -215,6 +222,7 @@ async def test_a_crash_after_purchase_adopts_instead_of_rebuying(
     # Walk up to the purchase step.
     await worker_env.worker.tick()  # validate
     await worker_env.worker.tick()  # generate_config
+    await worker_env.worker.tick()  # billing_gate
 
     # The vendor already sold us one under this tenant's name.
     await worker_env.twilio.purchase_number(
@@ -243,8 +251,9 @@ async def test_a_pending_row_is_written_before_the_purchase_call(
     is what gives a later attempt something to recover from.
     """
     tenant_id, _ = await create_signup(worker_env)
-    await worker_env.worker.tick()
-    await worker_env.worker.tick()
+    await worker_env.worker.tick()  # validate
+    await worker_env.worker.tick()  # generate_config
+    await worker_env.worker.tick()  # billing_gate
 
     worker_env.twilio.behaviour.fail(
         "purchase_number",
@@ -681,7 +690,7 @@ async def test_verification_catches_an_unlinked_number(worker_env: WorkerEnv) ->
     """
     _, run_id = await create_signup(worker_env)
 
-    for _ in range(5):  # validate .. link_number
+    for _ in range(6):  # validate .. link_number (billing_gate included)
         await worker_env.worker.tick()
 
     for phone in worker_env.elevenlabs.phones.values():

@@ -13,6 +13,7 @@ import type { ProvisioningView, StepStatus, TenantView } from "@/lib/types";
 const STEPS = [
   "validate",
   "generate_config",
+  "billing_gate",
   "purchase_number",
   "create_agent",
   "link_number",
@@ -57,6 +58,7 @@ function provisioning(
     })),
     completed_steps: statuses.filter((status) => status === "succeeded").length,
     total_steps: STEPS.length,
+    billing: null,
     ...overrides,
   };
 }
@@ -78,14 +80,16 @@ afterEach(() => {
 });
 
 describe("StatusView", () => {
-  it("shows all seven steps from the first render", async () => {
+  it("shows every step from the first render", async () => {
     stub(provisioning());
     render(<StatusView tenantId="t-1" />);
 
     await screen.findByText("Sunset Salon");
     expect(screen.getByText("Buy a phone number")).toBeInTheDocument();
     expect(screen.getByText("Verify the connection")).toBeInTheDocument();
-    expect(screen.getByText(/0 of 7/)).toBeInTheDocument();
+    expect(
+      screen.getByText(new RegExp(`0 of ${STEPS.length}`)),
+    ).toBeInTheDocument();
   });
 
   it("shows the number once the run is active", async () => {
@@ -97,7 +101,9 @@ describe("StatusView", () => {
 
     expect(await screen.findByText("+18055551000")).toBeInTheDocument();
     expect(screen.getByText(/Your receptionist is live/)).toBeInTheDocument();
-    expect(screen.getByText(/7 of 7/)).toBeInTheDocument();
+    expect(
+      screen.getByText(new RegExp(`${STEPS.length} of ${STEPS.length}`)),
+    ).toBeInTheDocument();
   });
 
   it("shows the failure and its reference without pretending nothing happened", async () => {
@@ -117,7 +123,7 @@ describe("StatusView", () => {
 
   it("shows a step's own error next to that step", async () => {
     const view = provisioning();
-    view.steps[2] = {
+    view.steps[STEPS.indexOf("purchase_number")] = {
       step_name: "purchase_number",
       status: "failed",
       attempt: 3,
@@ -207,5 +213,53 @@ describe("StatusView", () => {
     expect(vi.mocked(api.getProvisioning).mock.calls.length).toBe(afterSettle);
     // Two at most: the mount fetch and the one the settle triggered.
     expect(afterSettle).toBeLessThanOrEqual(2);
+  });
+});
+
+
+describe("StatusView — billing", () => {
+  it("explains a run parked on billing instead of showing an error", async () => {
+    // The distinction matters: this is not a failure, it is something the
+    // customer can fix. Showing them an error would be wrong and would
+    // generate a support ticket.
+    stub(
+      provisioning({
+        status: "billing_blocked",
+        billing: {
+          entitled: false,
+          plan: "trial",
+          status: "trialing",
+          trial_ends_at: null,
+          reason: "trial_expired",
+        },
+      }),
+    );
+
+    render(<StatusView tenantId="t-1" />);
+
+    expect(await screen.findByText(/waiting for your subscription/i)).toBeInTheDocument();
+    expect(screen.getByText(/free trial has ended/i)).toBeInTheDocument();
+    expect(screen.queryByText(/something went wrong/i)).not.toBeInTheDocument();
+  });
+
+  it("falls back to honest wording for an unrecognised reason", async () => {
+    stub(
+      provisioning({
+        status: "billing_blocked",
+        billing: {
+          entitled: false,
+          plan: null,
+          status: null,
+          trial_ends_at: null,
+          reason: "some_future_reason",
+        },
+      }),
+    );
+
+    render(<StatusView tenantId="t-1" />);
+
+    expect(
+      await screen.findByText(/need an active subscription/i),
+    ).toBeInTheDocument();
   });
 });

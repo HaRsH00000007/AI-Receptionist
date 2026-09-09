@@ -20,6 +20,7 @@ from app.models.enums import (
     StepStatus,
     TenantStatus,
 )
+from tests.support import grant
 
 SIGNUP: dict[str, Any] = {
     "business_name": "Sunset Salon",
@@ -52,9 +53,11 @@ async def drive_to_active(api_app: FastAPI, ticks: int = 12) -> None:
 # ---------------------------------------------------------------------------
 # Status endpoints
 # ---------------------------------------------------------------------------
-async def test_tenant_detail(api_client: AsyncClient) -> None:
+async def test_tenant_detail(api_client: AsyncClient, api_app: FastAPI) -> None:
     tenant_id = await signup(api_client)
-    response = await api_client.get(f"/api/v1/tenants/{tenant_id}")
+    response = await api_client.get(
+        f"/api/v1/tenants/{tenant_id}", params=grant(api_app, tenant_id)
+    )
 
     assert response.status_code == 200
     body = response.json()
@@ -63,23 +66,29 @@ async def test_tenant_detail(api_client: AsyncClient) -> None:
     assert body["timezone"] == "America/Los_Angeles"
 
 
-async def test_an_unknown_tenant_is_a_404(api_client: AsyncClient) -> None:
-    response = await api_client.get(f"/api/v1/tenants/{uuid.uuid4()}")
+async def test_an_unknown_tenant_is_a_404(api_client: AsyncClient, api_app: FastAPI) -> None:
+    # A valid grant for an id that has no tenant. The 404 must come from the
+    # tenant not existing, not from the grant disagreeing with the path -- so
+    # both must name the same id.
+    missing = uuid.uuid4()
+    response = await api_client.get(f"/api/v1/tenants/{missing}", params=grant(api_app, missing))
     assert response.status_code == 404
     assert response.json()["error"]["code"] == "not_found"
 
 
 async def test_provisioning_shows_the_whole_plan_immediately(
-    api_client: AsyncClient,
+    api_client: AsyncClient, api_app: FastAPI
 ) -> None:
     """All seven steps from the first second, so "stuck at 3 of 7" is answerable."""
     tenant_id = await signup(api_client)
-    response = await api_client.get(f"/api/v1/tenants/{tenant_id}/provisioning")
+    response = await api_client.get(
+        f"/api/v1/tenants/{tenant_id}/provisioning", params=grant(api_app, tenant_id)
+    )
 
     assert response.status_code == 200
     body = response.json()
     assert body["status"] == ProvisioningStatus.DRAFT.value
-    assert body["total_steps"] == 7
+    assert body["total_steps"] == 8
     assert body["completed_steps"] == 0
     assert [step["step_name"] for step in body["steps"]] == [
         step.value for step in ProvisioningStep
@@ -91,10 +100,14 @@ async def test_provisioning_reflects_progress(api_client: AsyncClient, api_app: 
     tenant_id = await signup(api_client)
     await drive_to_active(api_app)
 
-    body = (await api_client.get(f"/api/v1/tenants/{tenant_id}/provisioning")).json()
+    body = (
+        await api_client.get(
+            f"/api/v1/tenants/{tenant_id}/provisioning", params=grant(api_app, tenant_id)
+        )
+    ).json()
 
     assert body["status"] == ProvisioningStatus.ACTIVE.value
-    assert body["completed_steps"] == 7
+    assert body["completed_steps"] == 8
     assert body["last_error"] is None
     assert all(step["status"] == StepStatus.SUCCEEDED.value for step in body["steps"])
 
@@ -105,8 +118,12 @@ async def test_phone_and_agent_appear_once_active(
     tenant_id = await signup(api_client)
     await drive_to_active(api_app)
 
-    phone = (await api_client.get(f"/api/v1/tenants/{tenant_id}/phone")).json()
-    agent = (await api_client.get(f"/api/v1/tenants/{tenant_id}/agent")).json()
+    phone = (
+        await api_client.get(f"/api/v1/tenants/{tenant_id}/phone", params=grant(api_app, tenant_id))
+    ).json()
+    agent = (
+        await api_client.get(f"/api/v1/tenants/{tenant_id}/agent", params=grant(api_app, tenant_id))
+    ).json()
 
     assert phone["e164"].startswith("+1805")
     assert phone["status"] == PhoneNumberStatus.ACTIVE.value
@@ -115,9 +132,11 @@ async def test_phone_and_agent_appear_once_active(
     assert agent["config_version"] == 1
 
 
-async def test_phone_is_404_before_provisioning(api_client: AsyncClient) -> None:
+async def test_phone_is_404_before_provisioning(api_client: AsyncClient, api_app: FastAPI) -> None:
     tenant_id = await signup(api_client)
-    assert (await api_client.get(f"/api/v1/tenants/{tenant_id}/phone")).status_code == 404
+    assert (
+        await api_client.get(f"/api/v1/tenants/{tenant_id}/phone", params=grant(api_app, tenant_id))
+    ).status_code == 404
 
 
 async def test_calls_list_is_empty_then_populated(
@@ -126,7 +145,9 @@ async def test_calls_list_is_empty_then_populated(
     tenant_id = await signup(api_client)
     await drive_to_active(api_app)
 
-    assert (await api_client.get(f"/api/v1/tenants/{tenant_id}/calls")).json() == []
+    assert (
+        await api_client.get(f"/api/v1/tenants/{tenant_id}/calls", params=grant(api_app, tenant_id))
+    ).json() == []
 
     async with api_app.state.session_factory() as session:
         session.add(
@@ -141,7 +162,9 @@ async def test_calls_list_is_empty_then_populated(
         )
         await session.commit()
 
-    calls = (await api_client.get(f"/api/v1/tenants/{tenant_id}/calls")).json()
+    calls = (
+        await api_client.get(f"/api/v1/tenants/{tenant_id}/calls", params=grant(api_app, tenant_id))
+    ).json()
     assert len(calls) == 1
     assert calls[0]["summary"] == "Caller asked about Thursday."
     # The transcript is never published; only the summary is.
@@ -159,8 +182,17 @@ async def test_a_tenant_cannot_see_another_tenants_calls(
         session.add(Call(tenant_id=first, provider_call_id="conv_first", summary="first"))
         await session.commit()
 
-    assert (await api_client.get(f"/api/v1/tenants/{second}/calls")).json() == []
-    assert len((await api_client.get(f"/api/v1/tenants/{first}/calls")).json()) == 1
+    assert (
+        await api_client.get(f"/api/v1/tenants/{second}/calls", params=grant(api_app, second))
+    ).json() == []
+    assert (
+        len(
+            (
+                await api_client.get(f"/api/v1/tenants/{first}/calls", params=grant(api_app, first))
+            ).json()
+        )
+        == 1
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -231,7 +263,11 @@ async def test_retry_resets_a_failed_run(api_client: AsyncClient, api_app: FastA
     )
     await drive_to_active(api_app)
 
-    before = (await api_client.get(f"/api/v1/tenants/{tenant_id}/provisioning")).json()
+    before = (
+        await api_client.get(
+            f"/api/v1/tenants/{tenant_id}/provisioning", params=grant(api_app, tenant_id)
+        )
+    ).json()
     assert before["status"] == ProvisioningStatus.COMPENSATED.value
 
     run_id = before["run_id"]
@@ -241,7 +277,11 @@ async def test_retry_resets_a_failed_run(api_client: AsyncClient, api_app: FastA
 
     await drive_to_active(api_app)
 
-    after = (await api_client.get(f"/api/v1/tenants/{tenant_id}/provisioning")).json()
+    after = (
+        await api_client.get(
+            f"/api/v1/tenants/{tenant_id}/provisioning", params=grant(api_app, tenant_id)
+        )
+    ).json()
     assert after["status"] == ProvisioningStatus.ACTIVE.value
 
 
@@ -296,7 +336,11 @@ async def test_abandon_releases_the_number(api_client: AsyncClient, api_app: Fas
     tenant_id = await signup(api_client)
     await drive_to_active(api_app)
 
-    run_id = (await api_client.get(f"/api/v1/tenants/{tenant_id}/provisioning")).json()["run_id"]
+    run_id = (
+        await api_client.get(
+            f"/api/v1/tenants/{tenant_id}/provisioning", params=grant(api_app, tenant_id)
+        )
+    ).json()["run_id"]
     response = await api_client.post(f"/api/v1/admin/runs/{run_id}/abandon")
 
     assert response.status_code == 200

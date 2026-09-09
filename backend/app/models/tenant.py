@@ -9,6 +9,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
 from app.models.enums import (
+    AgentMode,
     BusinessType,
     TenantPlan,
     TenantStatus,
@@ -18,8 +19,10 @@ from app.models.enums import (
 if TYPE_CHECKING:
     from app.models.agent import Agent
     from app.models.agent_config import AgentConfig
+    from app.models.billing import Subscription
     from app.models.business_profile import BusinessProfile
     from app.models.call import Call
+    from app.models.identity import Membership
     from app.models.phone_number import PhoneNumber
     from app.models.provisioning import ProvisioningRun
 
@@ -55,6 +58,16 @@ class Tenant(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         nullable=False,
         default=TenantPlan.TRIAL,
     )
+    #: Which ElevenLabs topology serves this tenant. Per-tenant rather than a
+    #: global setting so the migration to shared vertical agents can move
+    #: customers in batches, verify each batch with a test call, and roll a
+    #: batch back on its own -- rather than being one switch for everyone.
+    agent_mode: Mapped[AgentMode] = mapped_column(
+        enum_column(AgentMode, "agent_mode"),
+        nullable=False,
+        default=AgentMode.PER_TENANT,
+        server_default=AgentMode.PER_TENANT.value,
+    )
     status: Mapped[TenantStatus] = mapped_column(
         enum_column(TenantStatus, "tenant_status"),
         nullable=False,
@@ -77,6 +90,14 @@ class Tenant(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         back_populates="tenant", cascade="all, delete-orphan"
     )
     calls: Mapped[list[Call]] = relationship(back_populates="tenant", cascade="all, delete-orphan")
+    memberships: Mapped[list[Membership]] = relationship(
+        back_populates="tenant", cascade="all, delete-orphan"
+    )
+    #: The tenant's live billing state. `uselist=False` because the partial
+    #: unique index guarantees at most one entitled subscription per tenant.
+    subscription: Mapped[Subscription | None] = relationship(
+        back_populates="tenant", cascade="all, delete-orphan", uselist=False
+    )
 
     __table_args__ = (
         Index(
