@@ -21,12 +21,15 @@ from app import __version__
 from app.api import health
 from app.api import v1 as api_v1
 from app.api.rate_limit import SlidingWindowLimiter
+from app.cache import DistributedRateLimiter, build_cache, make_cache_check
 from app.core.config import Settings, get_settings
 from app.core.correlation import CorrelationIdMiddleware, get_correlation_id
 from app.core.errors import AppError
 from app.core.logging import configure_logging, get_logger
+from app.core.metrics import MetricsRegistry
 from app.core.readiness import ReadinessRegistry
 from app.db.session import create_engine, create_session_factory, make_database_check
+from app.providers.circuit import CircuitRegistry
 from app.providers.registry import build_providers
 
 logger = get_logger(__name__)
@@ -57,10 +60,44 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.session_factory = create_session_factory(engine)
         app.state.readiness.register("database", make_database_check(engine))
 
+        # Redis. Registered as a *non-critical* dependency: a cache outage must
+        # not withdraw this replica from service, because every cache read has
+        # a PostgreSQL fallback and a withdrawn replica serves nobody.
+        cache = build_cache(settings)
+        app.state.cache = cache
+        app.state.readiness.register("redis", make_cache_check(cache), critical=False)
+
+        # Distributed limits sit in front of the per-process ones. Both endpoints
+        # behind them are expensive to abuse — signup buys a number, a magic link
+        # hands out a credential — so the Redis limiter degrades to the local
+        # limiter rather than to no limit at all.
+        app.state.signup_rate_limiter = DistributedRateLimiter(
+            cache,
+            scope="signup",
+            limit=settings.signup_rate_limit,
+            window_s=settings.signup_rate_limit_window_s,
+            fallback=app.state.signup_limiter,
+        )
+        app.state.login_rate_limiter = DistributedRateLimiter(
+            cache,
+            scope="login",
+            limit=settings.login_rate_limit,
+            window_s=settings.login_rate_limit_window_s,
+            fallback=app.state.login_limiter,
+        )
+
         # Resolved once. The API only needs providers for the admin actions, but
         # building them here means a misconfigured credential surfaces at
         # startup rather than on the first operator click.
         app.state.providers = build_providers(settings)
+
+        # Vendor circuit breakers. Per process on purpose: a shared breaker in
+        # Redis would let a cache problem open every circuit at once, escalating
+        # a cache outage into a total vendor outage.
+        app.state.circuits = CircuitRegistry(
+            failure_threshold=settings.circuit_failure_threshold,
+            cooldown_s=settings.circuit_cooldown_s,
+        )
 
         # Connected lazily and tolerantly. A Temporal outage must not stop the
         # API booting: signup still records a tenant, the status page still
@@ -82,6 +119,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             yield
         finally:
             await app.state.providers.aclose()
+            await cache.aclose()
             await engine.dispose()
             logger.info("application stopped")
 
@@ -98,6 +136,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app.state.settings = settings
     app.state.readiness = ReadinessRegistry()
+    # Per-application rather than module-global, so a test's assertions cannot
+    # be polluted by counts another test left behind.
+    app.state.metrics = MetricsRegistry()
     # Per-process, which is all a single-replica POC needs. Every accepted
     # signup eventually spends money, so the form is never left ungated.
     app.state.signup_limiter = SlidingWindowLimiter(

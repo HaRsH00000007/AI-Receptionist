@@ -24,7 +24,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.logging import get_logger
-from app.models import Call, PhoneNumber, Tenant, WebhookEvent
+from app.models import AgentConfig, Call, PhoneNumber, Tenant, WebhookEvent
 from app.models.enums import (
     CallDirection,
     CallStatus,
@@ -33,6 +33,7 @@ from app.models.enums import (
     WebhookStatus,
 )
 from app.providers.models import PostCallEvent
+from app.services.webhook_payload import redact_payload
 
 logger = get_logger(__name__)
 
@@ -50,11 +51,26 @@ class IngestResult:
 
 
 def derive_event_id(provider: WebhookProvider, payload: dict[str, Any], body: bytes) -> str:
-    """The provider's event id, or a hash of the body.
+    """A stable identity for one delivery, used to recognise a redelivery.
 
-    Falling back to a content hash keeps deduplication working for providers
-    that do not send an id: an identical redelivery hashes the same.
+    The provider's own event id where there is one, and a content hash where
+    there is not — an identical redelivery hashes the same, so deduplication
+    keeps working for providers that do not number their events.
+
+    Twilio is the case that needs care. It identifies the *call* with
+    ``CallSid`` and reports that call several times as it progresses, so keying
+    on ``CallSid`` alone would treat ``completed`` as a duplicate of ``ringing``
+    and silently drop a real status change. The status is therefore part of the
+    identity, which leaves a genuine redelivery of the *same* status still
+    recognisable as one.
     """
+    if provider is WebhookProvider.TWILIO:
+        call_sid = payload.get("CallSid") or payload.get("call_sid")
+        status = payload.get("CallStatus") or payload.get("call_status") or "unknown"
+        if isinstance(call_sid, str) and call_sid:
+            return f"CallSid:{call_sid}:{status}"
+        return "sha256:" + hashlib.sha256(body).hexdigest()
+
     # ElevenLabs nests the conversation id under `data`, so both levels are
     # searched. Without this every post-call delivery would fall back to a body
     # hash, and a redelivery that differed by a single byte would be recorded as
@@ -89,7 +105,11 @@ class WebhookService:
             provider=provider,
             event_id=event_id,
             event_type=event_type,
-            payload_json=payload,
+            # Redacted before it is stored, never after. A transcript kept here
+            # would be PII in a second place with its own retention question,
+            # and this table is rendered by the admin panel. See
+            # `app.services.webhook_payload` for what survives and why.
+            payload_json=redact_payload(payload),
             signature_valid=signature_valid,
             correlation_id=correlation_id,
             status=WebhookStatus.RECEIVED,
@@ -139,6 +159,9 @@ class WebhookService:
 
         call = Call(
             tenant_id=tenant.id,
+            # Stamped now, not joined later. "Which prompt said that?" must
+            # keep its answer after the tenant publishes a new version.
+            agent_config_version=await self._live_config_version(tenant.id),
             provider_call_id=parsed.provider_call_id,
             direction=CallDirection.INBOUND,
             from_e164=parsed.caller_number,
@@ -180,6 +203,17 @@ class WebhookService:
             },
         )
         return IngestResult(event.id, WebhookStatus.PROCESSED, call_id=call.id)
+
+    async def _live_config_version(self, tenant_id: uuid.UUID) -> int | None:
+        """The version live at this moment, or ``None`` if the tenant has none."""
+        return (
+            await self.session.execute(
+                select(AgentConfig.version)
+                .where(AgentConfig.tenant_id == tenant_id)
+                .where(AgentConfig.is_live.is_(True))
+                .limit(1)
+            )
+        ).scalar_one_or_none()
 
     async def _tenant_for(self, parsed: PostCallEvent) -> Tenant | None:
         """Resolve the tenant from the dialled number.

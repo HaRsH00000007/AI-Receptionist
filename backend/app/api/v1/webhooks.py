@@ -22,7 +22,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from temporalio.client import Client
 
-from app.api.deps import ProvidersDep, SettingsDep, TemporalClientDep
+from app.api.deps import CacheDep, MetricsDep, ProvidersDep, SettingsDep, TemporalClientDep
+from app.cache.dedupe import WebhookDedupe
 from app.core.correlation import get_correlation_id, new_correlation_id
 from app.core.errors import AppError
 from app.core.logging import get_logger
@@ -53,17 +54,34 @@ class WebhookAck(BaseModel):
     summary="ElevenLabs post-call webhook",
 )
 async def elevenlabs_post_call(
-    request: Request, session: SessionDep, settings: SettingsDep
+    request: Request,
+    session: SessionDep,
+    settings: SettingsDep,
+    cache: CacheDep,
+    metrics: MetricsDep,
 ) -> WebhookAck:
     body = await request.body()
     correlation_id = get_correlation_id() or new_correlation_id()
 
+    provided_signature = request.headers.get("elevenlabs-signature", "")
     signature_valid = verify_elevenlabs(
         payload=body,
-        header=request.headers.get("elevenlabs-signature", ""),
+        header=provided_signature,
         secret=settings.elevenlabs_webhook_secret.get_secret_value(),
+        tolerance_s=settings.webhook_tolerance_s,
     )
-    if not signature_valid and settings.is_production_like:
+    # A signature that is *present and wrong* is refused in every environment.
+    #
+    # The environment-dependent leniency exists so a local DRY_RUN loop works
+    # with no secret configured — that is an *absent* signature. A wrong one is
+    # never benign: it is a forgery attempt, a replay outside its window, or a
+    # rotated secret. Processing it would let anyone who guessed a customer's
+    # number inject a transcript that reaches the summarizer, the customer's
+    # inbox and the usage ledger.
+    if provided_signature and not signature_valid:
+        logger.warning("rejected an elevenlabs webhook whose signature did not verify")
+        return WebhookAck(received=True, status=WebhookStatus.REJECTED, detail="invalid signature")
+    if not signature_valid and settings.webhooks_require_signature:
         # Refused before anything is parsed or stored against a tenant.
         logger.warning("rejected an unsigned elevenlabs webhook in a production environment")
         return WebhookAck(received=True, status=WebhookStatus.REJECTED, detail="invalid signature")
@@ -76,11 +94,22 @@ async def elevenlabs_post_call(
         logger.warning("elevenlabs webhook body was not valid JSON")
         return WebhookAck(received=True, status=WebhookStatus.REJECTED, detail="malformed payload")
 
+    event_id = derive_event_id(WebhookProvider.ELEVENLABS, payload, body)
+
+    # The fast half of replay protection. A positive answer here means Redis
+    # has *confirmed* we stored this delivery already, so the database is not
+    # consulted at all. A miss or an outage falls through to the unique index
+    # on (provider, event_id), which is the authoritative half and cannot be
+    # wrong — see app.cache.dedupe for why the asymmetry matters.
+    dedupe = WebhookDedupe(cache, settings)
+    if await dedupe.seen_before(WebhookProvider.ELEVENLABS, event_id):
+        return WebhookAck(received=True, status=WebhookStatus.DUPLICATE)
+
     service = WebhookService(session)
     event = await service.record(
         provider=WebhookProvider.ELEVENLABS,
         event_type=str(payload.get("type", "post_call_transcription")),
-        event_id=derive_event_id(WebhookProvider.ELEVENLABS, payload, body),
+        event_id=event_id,
         payload=payload,
         signature_valid=signature_valid,
         correlation_id=correlation_id,
@@ -94,6 +123,9 @@ async def elevenlabs_post_call(
         return WebhookAck(received=True, status=result.status, detail=result.detail)
 
     result = await service.ingest_post_call(event, parsed)
+    metrics.counter("webhook_deliveries_total").inc(
+        provider="elevenlabs", status=result.status.value
+    )
     return WebhookAck(received=True, status=result.status, detail=result.detail)
 
 
@@ -104,7 +136,11 @@ async def elevenlabs_post_call(
     summary="Twilio call status callback",
 )
 async def twilio_voice_status(
-    request: Request, session: SessionDep, settings: SettingsDep
+    request: Request,
+    session: SessionDep,
+    settings: SettingsDep,
+    cache: CacheDep,
+    metrics: MetricsDep,
 ) -> WebhookAck:
     """Recorded for the audit trail only.
 
@@ -119,6 +155,7 @@ async def twilio_voice_status(
     form = await request.form()
     params = {key: str(value) for key, value in form.items()}
 
+    provided_signature = request.headers.get("x-twilio-signature", "")
     signature_valid = verify_twilio(
         url=public_request_url(
             observed_url=str(request.url),
@@ -127,17 +164,32 @@ async def twilio_voice_status(
             public_base=settings.public_api_url,
         ),
         params=params,
-        header=request.headers.get("x-twilio-signature", ""),
+        header=provided_signature,
         auth_token=settings.twilio_auth_token.get_secret_value(),
     )
-    if not signature_valid and settings.is_production_like:
-        logger.warning("rejected an unsigned twilio webhook in a production environment")
+    # Present-and-wrong is refused everywhere; see the ElevenLabs handler above.
+    if provided_signature and not signature_valid:
+        logger.warning("rejected a twilio webhook whose signature did not verify")
         return WebhookAck(received=True, status=WebhookStatus.REJECTED, detail="invalid signature")
+    if not signature_valid and settings.webhooks_require_signature:
+        logger.warning("rejected an unsigned twilio webhook")
+        return WebhookAck(received=True, status=WebhookStatus.REJECTED, detail="invalid signature")
+
+    # Twilio signs the URL and parameters but sends no timestamp, so there is no
+    # age to check: a captured request stays valid until its secret rotates.
+    # Deduplication is therefore the whole replay defence here, which is why the
+    # event id includes the call status as well as the CallSid — the same call
+    # legitimately reports `ringing` then `completed`, and collapsing those into
+    # one event would drop a real status change.
+    event_id = derive_event_id(WebhookProvider.TWILIO, params, body)
+    dedupe = WebhookDedupe(cache, settings)
+    if await dedupe.seen_before(WebhookProvider.TWILIO, event_id):
+        return WebhookAck(received=True, status=WebhookStatus.DUPLICATE)
 
     event = await WebhookService(session).record(
         provider=WebhookProvider.TWILIO,
         event_type=params.get("CallStatus", "unknown"),
-        event_id=derive_event_id(WebhookProvider.TWILIO, params, body),
+        event_id=event_id,
         payload=params,
         signature_valid=signature_valid,
         correlation_id=get_correlation_id() or new_correlation_id(),
@@ -147,6 +199,7 @@ async def twilio_voice_status(
 
     event.status = WebhookStatus.PROCESSED
     await session.commit()
+    metrics.counter("webhook_deliveries_total").inc(provider="twilio", status="processed")
     return WebhookAck(received=True, status=WebhookStatus.PROCESSED)
 
 
@@ -162,6 +215,8 @@ async def stripe_webhook(
     settings: SettingsDep,
     providers: ProvidersDep,
     temporal: TemporalClientDep,
+    cache: CacheDep,
+    metrics: MetricsDep,
 ) -> WebhookAck:
     """Apply a Stripe billing event.
 
@@ -194,9 +249,17 @@ async def stripe_webhook(
             "rejected an unverified Stripe webhook",
             extra={"code": exc.code, "correlation_id": correlation_id},
         )
+        metrics.counter("webhook_deliveries_total").inc(provider="stripe", status="rejected")
         return WebhookAck(received=True, status=WebhookStatus.REJECTED, detail="invalid signature")
 
     payload: dict[str, Any] = json.loads(body) if body else {}
+
+    # Stripe's event id is globally unique and stable across redeliveries, so
+    # the Redis marker is a pure latency win over the unique index below.
+    dedupe = WebhookDedupe(cache, settings)
+    if await dedupe.seen_before(WebhookProvider.STRIPE, event.event_id):
+        return WebhookAck(received=True, status=WebhookStatus.DUPLICATE, detail="already processed")
+
     service = WebhookService(session)
 
     # Stripe's own event id is globally unique and stable across redeliveries,
@@ -240,6 +303,7 @@ async def stripe_webhook(
             "tenant_id": str(result.tenant_id) if result.tenant_id else None,
         },
     )
+    metrics.counter("webhook_deliveries_total").inc(provider="stripe", status=stored.status.value)
     return WebhookAck(received=True, status=stored.status, detail=result.reason)
 
 

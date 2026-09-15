@@ -1,8 +1,7 @@
 # Production Migration Plan — POC → Production Architecture v1
 
-**Status:** M0–M4, M10, M19 and the local stack (M35) complete and validated.
-Remaining: M5–M9, M11–M18, M20.
-**Audit date:** 2026-09-09
+**Status:** M0–M20 complete and validated against the running local stack.
+**Audit date:** 2026-09-09 · **Completed:** 2026-09-13
 **Scope:** evolve the existing POC in place. Not a rewrite.
 
 This document is the output of an actual inspection of the repository, not a
@@ -230,28 +229,28 @@ M1  config / environment redesign           ← COMPLETE
 M2  database, schema, tenant isolation      ← COMPLETE
 M3  authentication + authorization          ← COMPLETE
 M4  Temporal orchestration                  ← COMPLETE
-M5  Redis infrastructure                    ← needs Redis service
-M6  production telephony path               ← needs M5 (300ms budget)
-M7  shared ElevenLabs agent architecture    ← needs M6
-M8  LLM config generation + versioning      ← needs M2
-M9  webhook security + replay               ← needs M2
+M5  Redis infrastructure                    ← COMPLETE
+M6  production telephony path               ← COMPLETE
+M7  shared ElevenLabs agent architecture    ← COMPLETE
+M8  LLM config generation + versioning      ← COMPLETE
+M9  webhook security + replay               ← COMPLETE
 M10 billing / Stripe                        ← COMPLETE
-M11 usage + cost metering                   ← needs M10
-M12 PII, encryption, retention              ← needs M2
-M13 notifications / email                   ← needs Mailpit
-M14 customer dashboard                      ← needs M3, M10
-M15 admin panel                             ← needs M14
-M16 observability                           ← cross-cutting, after M4/M6
-M17 outage handling                         ← needs M4, M5, M6
-M18 load + security testing                 ← needs M6, M17
-M19 CI/CD readiness                          ← COMPLETE
-M20 full local production E2E               ← needs everything
+M11 usage + cost metering                   ← COMPLETE
+M12 PII, encryption, retention              ← COMPLETE
+M13 notifications / email                   ← COMPLETE
+M14 customer dashboard                      ← COMPLETE
+M15 admin panel                             ← COMPLETE
+M16 observability                           ← COMPLETE
+M17 outage handling                         ← COMPLETE
+M18 load + security testing                 ← COMPLETE
+M19 CI/CD readiness                         ← COMPLETE
+M20 full local production E2E               ← COMPLETE
 ```
 
-All completed modules are validated against the real stack: 551 backend tests,
-30 frontend tests, ruff, strict mypy, `alembic check`, and a reversible
-migration round trip. Every vendor is a fake — see M10's limitations for what
-that does and does not prove.
+All modules are validated against the real stack: **799 backend tests, 53
+frontend tests**, ruff, strict mypy, `alembic check`, a reversible migration
+round trip, and a production frontend build. Every vendor is a fake — see
+"Limitations" below for exactly what that does and does not prove.
 
 ---
 
@@ -497,9 +496,219 @@ these columns are plain `VARCHAR(48)` with validation in the application layer.
   `max_numbers`, but minute limits and overage behaviour are not enforced —
   that is M11.
 
-### M7–M20
-Scope as stated in the brief; detail deferred to each module's own commit so
-this document does not become fiction written months ahead of the code.
+### M5 — Redis (COMPLETE)
+
+One invariant governs the package: **PostgreSQL is the source of truth; losing
+Redis degrades latency, never correctness.** The proof is that the suite runs
+with `REDIS_ENABLED` both ways and passes identically on correctness.
+
+`app/cache/` holds a fail-soft client whose central design choice is that a
+cache *miss* and a cache *outage* are different answers. `UNKNOWN` is a distinct
+return value, so no caller can mistake "I could not reach Redis" for "there is
+nothing there" — the mistake that would let a replayed webhook through a dedupe
+check, or two workers into one critical section.
+
+The fallback direction is chosen per concern, and they do not all point the same
+way. Locks **fail open**: the real guarantee is a partial unique index, and
+refusing would trade a cache outage for a provisioning outage. Dedupe **falls
+through** to the unique index on `(provider, event_id)`. Rate limiting **fails
+closed** to the in-process limiter, because "the cache is down, let everyone
+through" is not an acceptable reading of a cache failure on a form that spends
+money.
+
+Redis is a **non-critical** readiness dependency: an outage is reported in
+`/readyz` under `degraded` but does not withdraw the replica, because a
+withdrawn replica serves nobody.
+
+### M6 — Production telephony (COMPLETE)
+
+`/voice/inbound` returns TwiML; `/voice/init` serves per-call dynamic variables.
+Both sit on the audible path, so both never raise, never wait, and never trust
+the request. See `docs/TELEPHONY.md` for the call flow and disposition table.
+
+TwiML is built with `xml.etree`, which is a security control rather than a style
+choice: business names come from a signup form and caller ids come from the
+PSTN, and an f-string would let a `<` in either restructure the document Twilio
+then executes. XML injection here is remote control of a phone call.
+
+Twilio's signature is verified **before** the dialled number selects a tenant,
+and verification is mandatory whenever an auth token is configured — stricter
+than the status callback, because this request decides whose agent answers.
+
+The POC path is untouched and remains the default (`CALL_PATH=elevenlabs_native`).
+
+### M7 — Shared vertical agents (COMPLETE)
+
+`tenants.agent_mode` selects per tenant, so a migration moves customers in
+verifiable batches. Shared agent ids are **configured, never discovered** —
+nothing in the application can create one, because code that can create one can
+create a second by accident, and two agents serving one vertical is a
+split-brain where half the customers get a stale prompt.
+
+Two guards exist because sharing creates a class of failure the per-tenant shape
+does not have — an operation scoped to one tenant that damages all of them:
+
+* **compensation never deletes a shared agent.** `agents.is_shared` is recorded
+  on the row rather than inferred from the tenant's current mode, because a
+  tenant migrated between modes would make that inference wrong exactly once,
+  catastrophically.
+* **resync refuses to run against a shared agent.** Pushing one tenant's prompt
+  would overwrite the prompt every other tenant on that vertical is served by.
+
+`uq_agents_elevenlabs_agent_id` became a partial index over dedicated agents
+only — still catching two tenants adopting one private agent, while allowing the
+sharing this module exists for.
+
+### M8 — Config versioning (COMPLETE)
+
+`ConfigVersionService` is the single implementation of "demote the old row,
+promote the new one", shared by the provisioning step, the admin rollback and
+the future config editor. Version numbers are never reused after a rollback:
+reuse would make two different prompts share an identity and silently re-point
+every call that cited the old one.
+
+`calls.agent_config_version` is **stamped at ingestion, not joined at read
+time** — joining "the live config" months later would answer with whatever is
+live then, blaming a prompt published after the call for what it said.
+
+Rollback takes no provider argument at all. That is the structural guarantee it
+works while ElevenLabs is down, which is exactly when retiring a bad prompt is
+most urgent. Pushing the restored prompt to the vendor is the separate,
+retryable `resync-agent` action.
+
+### M9 — Webhook security (COMPLETE)
+
+Signature verification for all three providers, with constant-time comparison, a
+signed timestamp inside the MAC (so a captured body cannot be refreshed under a
+fresh timestamp), and public-URL reconstruction for deployments behind a proxy.
+
+**Hardened during M18:** a signature that is *present and wrong* is now refused
+in every environment. The environment-dependent leniency exists so a local
+DRY_RUN loop works with no secret configured — that is an *absent* signature. A
+wrong one is a forgery, a replay outside its window, or a rotated secret, and is
+never benign.
+
+Stored payloads are redacted before they are written
+(`app/services/webhook_payload.py`): credentials by key pattern, transcripts
+summarized rather than duplicated. A transcript kept here would be PII in a
+second place with its own retention question, outliving the M12 policy.
+
+### M11 — Usage metering (COMPLETE)
+
+The ledger is append-only and a correction is a new row, possibly negative.
+Rollups are **recomputed, never incremented** — incrementing twice is a silent
+overcharge nobody can later prove happened; recomputing converges however many
+times it runs, which is what makes a late webhook harmless.
+
+Idempotency is the unique index on `(provider, provider_reference)`, and the
+insert runs inside a **savepoint** so a duplicate cannot poison the caller's
+transaction and roll back the summary and notification sharing that session.
+
+Metering informs warnings and, on the trial plan, enforcement. It never decides
+entitlement: `billing_gate` reads `subscriptions` and does not import this
+module, so a metering bug has no path to authorizing a purchase.
+
+### M12 — PII and retention (COMPLETE)
+
+Retention **redacts rather than deletes rows**. A call's transcript, caller
+number and summary are erased; the row survives carrying duration, timing and
+tenant — the billing skeleton, which identifies nobody. A vanished row is the
+wrong answer to both "did you delete my data?" and "why am I billed for this?".
+
+`PROTECTED_FROM_ERASURE` names the tables that must never be touched. Nothing
+sweeps by pattern, so a table added later is considered deliberately rather than
+swept into an erasure or silently missed by one.
+
+*A bug worth recording:* the first implementation set `transcript_json = None`,
+which SQLAlchemy renders as the JSON value `null` — not SQL NULL, and still
+matching `IS NOT NULL`. The sweep would have run nightly, reported success and
+deleted nothing, forever. It now uses `sqlalchemy.null()`, and a test asserts
+the row is genuinely redacted.
+
+### M13 — Notifications (COMPLETE)
+
+A durable outbox. The row exists **before** any send is attempted, because the
+alternative has a failure mode indistinguishable from success: the provider is
+down, an exception is logged, and nobody learns the customer was never told.
+
+Deduplication is a unique index on a `dedupe_key` derived from the event being
+announced, so two workers racing one redelivered webhook collide in the database
+instead of both emailing. Only the template id and its variables are stored —
+never the rendered body, which would duplicate customer content and freeze
+wording a later deploy was fixing.
+
+A rendering failure is classified permanent; a vendor failure is transient.
+
+### M14 — Customer dashboard (COMPLETE)
+
+`/login` and `/dashboard`. The tenant id comes from the session's memberships
+and every request is re-authorized server-side; a dashboard that trusted an id
+from the URL would be an IDOR. Everything on the page is read-only, which keeps
+the blast radius of a bug on the most exposed surface as small as possible.
+
+### M15 — Admin panel (COMPLETE)
+
+`/admin`. The operator key is held in component state and **never persisted** —
+an XSS bug on a page that stored it would hand an attacker the ability to
+release customers' phone numbers. Abandon names its consequence before it runs;
+retry does not prompt, because it is idempotent and prompting for it would train
+operators to click through the prompts that do matter.
+
+### M16 — Observability (COMPLETE)
+
+A dependency-free metrics registry exposed at `/metrics` in Prometheus format,
+alongside the structured logging and correlation ids that already existed.
+
+Every metric is declared at startup so a panel reads `0` rather than "no data" —
+the difference between "nothing is failing" and "the exporter is broken", which
+is not a distinction to be making at 3am. **Label values are bounded**: a tenant
+id as a label is an unbounded cardinality explosion, so identifiers go in logs
+and traces while labels carry only small closed sets.
+
+Tests assert the negative space too: no tenant id, caller number or call sid
+appears in `/metrics`, and no caller number appears in the inbound-call logs.
+
+### M17 — Outage handling (COMPLETE)
+
+A per-vendor circuit breaker. Its value is not that the vendor recovers sooner;
+it is that our fallback runs in milliseconds instead of after a 30-second
+timeout — the difference between a caller hearing a recorded apology and a
+caller hearing nothing.
+
+Wired into `/voice/inbound`: when the voice vendor's circuit is open the call is
+answered with a voicemail rather than handed to a stream that will not connect.
+Checked *before* the TwiML is built, because once `<Connect><Stream>` is in
+Twilio's hands the call has left us.
+
+Breakers are per process. A shared breaker in Redis would let a cache problem
+open every circuit at once — a cache outage escalating into a total vendor
+outage.
+
+### M18 — Security and load testing (COMPLETE)
+
+`tests/test_security_suite.py` attacks the running application from outside:
+authentication bypass, tenant enumeration, IDOR, forged and replayed webhooks,
+injection, malformed bodies, rate limiting, and concurrency on the paths that
+spend money — including a burst of workers racing one provisioning run to prove
+only one number is ever bought.
+
+Every test is written as an attack that must fail rather than a feature that
+must work, because a feature test would keep passing if authorization were
+removed entirely.
+
+This suite is what found the present-but-wrong signature gap recorded under M9.
+
+### M20 — Full local E2E (COMPLETE)
+
+`tests/test_full_e2e.py` walks signup → billing gate → LLM config → number →
+agent → link → verify → ACTIVE → inbound call → webhook → call record →
+transcript → summary → notification → usage → dashboard → admin, against the
+real database and the real HTTP stack.
+
+The failure scenarios carry equal weight: a call to a number we do not own, a
+vendor outage mid-journey, a triple-delivered webhook that must produce one call
+and one usage event and one email, a forged webhook that reaches nothing, and
+another tenant's grant opening nothing. See `docs/E2E_TESTING.md`.
 
 ---
 

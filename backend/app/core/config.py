@@ -61,6 +61,22 @@ OrchestratorName = Literal["state_machine", "temporal"]
 #: batches rather than all at once.
 AgentModeName = Literal["per_tenant", "shared_vertical"]
 
+#: How a call physically reaches the voice agent.
+#:
+#: ``elevenlabs_native`` is the POC path: the number is imported into
+#: ElevenLabs and the vendor owns routing end to end. Simple, and it works, but
+#: we see nothing — no call record until the post-call webhook, no fallback when
+#: the vendor is down, no way to route one number two ways.
+#:
+#: ``twiml_stream`` is the production path: Twilio posts to us, we decide, and
+#: we hand the media stream to the vendor with ``<Connect><Stream>``. We own
+#: routing, we can answer with a voicemail when the vendor is unreachable, and
+#: every call is recorded at the moment it arrives rather than after it ends.
+#:
+#: Both are kept. The POC path stays the default so that existing tenants are
+#: unaffected until they are migrated deliberately.
+CallPathName = Literal["elevenlabs_native", "twiml_stream"]
+
 
 class Settings(BaseSettings):
     """Everything the process needs to know, validated at startup."""
@@ -193,6 +209,14 @@ class Settings(BaseSettings):
     #: Default agent topology for newly provisioned tenants. Existing tenants
     #: keep whatever their own `tenants.agent_mode` column says.
     default_agent_mode: AgentModeName = "per_tenant"
+    #: Shared vertical agents, as "salon:agent_a,legal:agent_b,generic:agent_z".
+    #:
+    #: Configured rather than discovered: agent ids are account-specific and
+    #: differ between test and live ElevenLabs accounts, exactly like Stripe
+    #: price ids. Nothing in the application creates a shared agent — code that
+    #: can create one can create a second by accident, and two agents serving
+    #: one vertical is a split-brain where half the customers get a stale prompt.
+    shared_agent_ids: str = ""
 
     # ---- Redis -----------------------------------------------------------
     # Redis is a performance and coordination layer, never the source of truth.
@@ -297,11 +321,52 @@ class Settings(BaseSettings):
     smtp_password: SecretStr = SecretStr("")
     smtp_use_tls: bool = False
 
+    #: How often the worker runs retention and usage rollups. Slow on purpose:
+    #: both are idempotent catch-up jobs, not latency-sensitive work.
+    maintenance_interval_s: int = Field(default=3_600, ge=60)
+
     # ---- Data retention --------------------------------------------------
     #: Days a transcript is kept before the retention job removes it. Per-plan
     #: overrides live in the database; this is the floor.
     transcript_retention_days: int = Field(default=90, ge=1)
     recording_retention_days: int = Field(default=30, ge=1)
+
+    # ---- Telephony -------------------------------------------------------
+    #: Which call path new and migrated tenants use. See `CallPathName`.
+    call_path: CallPathName = "elevenlabs_native"
+    #: The ElevenLabs conversational websocket that `<Connect><Stream>` targets.
+    #: Configurable because it is a vendor endpoint, not a constant of ours.
+    elevenlabs_stream_url: str = "wss://api.elevenlabs.io/v1/convai/conversation"
+    #: Voice used for the fallback announcements Twilio speaks directly. Only
+    #: reached when ElevenLabs is not carrying the call.
+    twilio_fallback_voice: str = "Polly.Joanna"
+    #: Seconds of voicemail accepted when the agent cannot take the call.
+    voicemail_max_length_s: int = Field(default=120, ge=10, le=600)
+    #: Announce that the call is recorded. Recording consent is jurisdictional;
+    #: where it is required this must be on, and the announcement is injected
+    #: into the greeting rather than left to the prompt to remember.
+    recording_consent_announcement: bool = False
+
+    # ---- Vendor circuit breakers -----------------------------------------
+    #: Consecutive failures before a vendor is treated as down. Low enough to
+    #: matter during a real outage, high enough that one blip does not trip it.
+    circuit_failure_threshold: int = Field(default=5, ge=1)
+    #: How long a circuit stays open before one probe is allowed through.
+    circuit_cooldown_s: float = Field(default=30.0, gt=0)
+
+    # ---- Webhook security ------------------------------------------------
+    #: Refuse any delivery whose signature does not verify.
+    #:
+    #: Always true in a production-like environment — see
+    #: `webhooks_require_signature`. This setting only *raises* the bar in
+    #: local and test environments, where an unsigned delivery is otherwise
+    #: recorded with `signature_valid=False` so a DRY_RUN loop stays usable.
+    #: It can never lower it: there is no way to switch verification off in
+    #: staging or production.
+    require_webhook_signature: bool = False
+    #: How old a signed delivery may be before it is refused as a replay.
+    #: Applies to providers that sign a timestamp (ElevenLabs, Stripe).
+    webhook_tolerance_s: int = Field(default=1_800, ge=60)
 
     # ---- Public URLs -----------------------------------------------------
     #: Used in notification emails so a recipient can reach the status page.
@@ -492,6 +557,17 @@ class Settings(BaseSettings):
     def is_production_like(self) -> bool:
         """True where mistakes are expensive and output must be machine-readable."""
         return self.environment in ("staging", "production")
+
+    @property
+    def webhooks_require_signature(self) -> bool:
+        """Whether an unverified delivery is refused outright.
+
+        Production-like environments always require one; the setting can only
+        turn it on elsewhere, never off there. Expressed as `or` rather than a
+        settable default so that no configuration mistake can disable signature
+        checking in production.
+        """
+        return self.is_production_like or self.require_webhook_signature
 
     @property
     def backoff_schedule_s(self) -> tuple[int, ...]:

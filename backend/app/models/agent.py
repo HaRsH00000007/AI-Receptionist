@@ -41,7 +41,26 @@ class Agent(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     )
 
     #: Null while PENDING, set once ElevenLabs returns an id.
-    elevenlabs_agent_id: Mapped[str | None] = mapped_column(String(64), nullable=True, unique=True)
+    #: The vendor's agent id.
+    #:
+    #: Not globally unique any more, and that is the whole point of shared
+    #: agents: every salon tenant points at the *same* vertical agent. Uniqueness
+    #: is instead enforced by a partial index over dedicated agents only, which
+    #: still catches the failure it was written for — two tenants accidentally
+    #: adopting one private agent.
+    elevenlabs_agent_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+    #: Whether this row points at an agent shared with other tenants.
+    #:
+    #: The most consequential flag in the schema. Compensation deletes a failed
+    #: tenant's agent at the vendor; doing that to a shared vertical agent would
+    #: take down every other tenant using it. So the row records what it *is*
+    #: rather than letting compensation infer it from the tenant's current mode —
+    #: a tenant migrated between modes would otherwise make history lie, and the
+    #: inference would be wrong exactly once, catastrophically.
+    is_shared: Mapped[bool] = mapped_column(
+        nullable=False, default=False, server_default=text("false")
+    )
 
     status: Mapped[AgentStatus] = mapped_column(
         enum_column(AgentStatus, "agent_status"),
@@ -60,5 +79,13 @@ class Agent(UUIDPrimaryKeyMixin, TimestampMixin, Base):
             "tenant_id",
             unique=True,
             postgresql_where=text(f"status = '{AgentStatus.ACTIVE.value}'"),
+        ),
+        # A *dedicated* agent belongs to exactly one tenant. Shared agents are
+        # excluded, because many tenants legitimately point at one of those.
+        Index(
+            "uq_agents_dedicated_elevenlabs_agent_id",
+            "elevenlabs_agent_id",
+            unique=True,
+            postgresql_where=text("NOT is_shared AND elevenlabs_agent_id IS NOT NULL"),
         ),
     )

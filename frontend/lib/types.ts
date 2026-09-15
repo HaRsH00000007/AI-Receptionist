@@ -1,17 +1,17 @@
 /**
  * The shapes the API returns.
  *
- * Hand-written rather than generated, because there are six of them and a
- * generator would be one more thing to run. They mirror `app/schemas/views.py`
- * and `app/schemas/signup.py`; the round-trip is covered by the backend tests.
+ * Hand-written rather than generated. They mirror `app/schemas/views.py`,
+ * `app/schemas/signup.py`, `app/schemas/auth.py` and `app/schemas/business.py`;
+ * the round-trip is covered by the backend tests.
  */
 
 export const BUSINESS_TYPES = [
-  { value: "salon", label: "Salon" },
-  { value: "legal", label: "Legal" },
-  { value: "medical", label: "Medical" },
+  { value: "salon", label: "Salon & spa" },
+  { value: "legal", label: "Law firm" },
+  { value: "medical", label: "Medical practice" },
   { value: "real_estate", label: "Real estate" },
-  { value: "other", label: "Other" },
+  { value: "other", label: "Something else" },
 ] as const;
 
 export const GREETING_STYLES = [
@@ -29,6 +29,10 @@ export const PLANS = [
 export type BusinessType = (typeof BUSINESS_TYPES)[number]["value"];
 export type GreetingStyle = (typeof GREETING_STYLES)[number]["value"];
 export type Plan = (typeof PLANS)[number]["value"];
+
+export function businessTypeLabel(value: string): string {
+  return BUSINESS_TYPES.find((option) => option.value === value)?.label ?? value;
+}
 
 export interface SignupRequest {
   business_name: string;
@@ -66,12 +70,7 @@ export interface SignupResponse {
 }
 
 /** Mirrors `StepStatus` on the backend. */
-export type StepStatus =
-  | "pending"
-  | "running"
-  | "succeeded"
-  | "failed"
-  | "skipped";
+export type StepStatus = "pending" | "running" | "succeeded" | "failed" | "skipped";
 
 export interface StepView {
   step_name: string;
@@ -156,6 +155,8 @@ export interface PhoneNumberView {
   released_at: string | null;
 }
 
+export type CallStatus = "received" | "transcribed" | "summarized" | "notified" | "failed";
+
 export interface CallView {
   id: string;
   provider_call_id: string;
@@ -166,6 +167,7 @@ export interface CallView {
   status: string;
   summary: string | null;
   caller_name: string | null;
+  /** Read off the conversation by a model — claimed by the caller, never verified. */
   callback_number: string | null;
   intent: string | null;
   urgency: number | null;
@@ -193,14 +195,180 @@ export function isTerminal(status: ProvisioningStatus): boolean {
   return TERMINAL_STATUSES.has(status);
 }
 
-/** Human labels for the seven steps, in order. */
-export const STEP_LABELS: Record<string, string> = {
-  validate: "Validate the details",
-  generate_config: "Write the receptionist's instructions",
-  billing_gate: "Confirm your subscription",
-  purchase_number: "Buy a phone number",
-  create_agent: "Create the voice agent",
-  link_number: "Connect the number to the agent",
-  verify: "Verify the connection",
-  activate: "Activate and send the welcome email",
-};
+// ---------------------------------------------------------------------------
+// Business profile — what the receptionist knows
+// ---------------------------------------------------------------------------
+
+export type Weekday =
+  | "monday"
+  | "tuesday"
+  | "wednesday"
+  | "thursday"
+  | "friday"
+  | "saturday"
+  | "sunday";
+
+export const WEEKDAYS: readonly Weekday[] = [
+  "monday",
+  "tuesday",
+  "wednesday",
+  "thursday",
+  "friday",
+  "saturday",
+  "sunday",
+];
+
+export interface DaySchedule {
+  day: Weekday;
+  closed: boolean;
+  /** 24-hour "HH:MM", local to the business. */
+  opens_at: string | null;
+  closes_at: string | null;
+}
+
+export interface BusinessHours {
+  timezone: string;
+  days: DaySchedule[];
+}
+
+export type EscalationMode = "take_message" | "notify_owner" | "transfer";
+
+export interface EscalationRule {
+  when: string;
+  mode: EscalationMode;
+}
+
+export interface EscalationPolicy {
+  default_mode: EscalationMode;
+  rules: EscalationRule[];
+  notify_email: string | null;
+  notify_phone: string | null;
+}
+
+export interface BusinessProfileView {
+  services: string[];
+  /** Exactly what the business typed. Always present when submitted. */
+  hours_raw: string | null;
+  /** The structured reading, once one exists. */
+  hours: BusinessHours | null;
+  greeting_style: GreetingStyle;
+  escalation_raw: string | null;
+  escalation: EscalationPolicy | null;
+  /** The live opening line callers hear, once a configuration is live. */
+  greeting: string | null;
+  config_version: number | null;
+}
+
+// ---------------------------------------------------------------------------
+// Authentication — what the dashboard needs to know about the viewer
+// ---------------------------------------------------------------------------
+
+export type MembershipRole = "owner" | "admin" | "member";
+
+export interface TenantMembership {
+  tenant_id: string;
+  name: string;
+  role: MembershipRole;
+}
+
+/**
+ * The signed-in user.
+ *
+ * `memberships` is the authorization surface the UI reads: it decides which
+ * organizations appear in the switcher. It is *not* the authorization itself —
+ * every tenant-scoped request is re-checked server-side against the session
+ * cookie, because a browser that could assert its own membership would be
+ * asserting its own access.
+ */
+export interface SessionView {
+  user_id: string;
+  email: string;
+  full_name: string | null;
+  is_platform_admin: boolean;
+  active_tenant_id: string | null;
+  memberships: TenantMembership[];
+  impersonated: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// Usage
+// ---------------------------------------------------------------------------
+
+export interface UsageView {
+  period_start: string;
+  period_end: string;
+  call_count: number;
+  call_minutes: number;
+  included_minutes: number;
+  percent_used: number;
+  over_limit: boolean;
+  /** True at 80% — a warning, before anything is enforced. */
+  warning: boolean;
+  /** Whether calls stop at the limit. Only the trial plan does. */
+  blocks_on_overage: boolean;
+  plan: string;
+}
+
+// ---------------------------------------------------------------------------
+// Agent configuration
+// ---------------------------------------------------------------------------
+
+export interface AgentConfigView {
+  version: number;
+  is_live: boolean;
+  generated_by: string;
+  generator_detail: string | null;
+  template_version: string | null;
+  voice_id: string | null;
+  created_at: string;
+}
+
+export interface AgentConfigDetailView extends AgentConfigView {
+  system_prompt: string;
+  first_message: string;
+  model_params: Record<string, unknown>;
+}
+
+export interface AgentView {
+  elevenlabs_agent_id: string | null;
+  status: string;
+  config_version: number | null;
+  voice_id?: string | null;
+  generated_by?: string | null;
+  synced_at: string | null;
+}
+
+// ---------------------------------------------------------------------------
+// Admin
+// ---------------------------------------------------------------------------
+
+export interface RunSummaryView {
+  run_id: string;
+  tenant_id: string;
+  business_name: string;
+  status: ProvisioningStatus;
+  current_step: string | null;
+  attempt: number;
+  last_error: string | null;
+  started_at: string | null;
+  finished_at: string | null;
+}
+
+export interface ActionResult {
+  ok: boolean;
+  detail: string;
+  run_id?: string | null;
+}
+
+export interface ReadinessCheck {
+  ok: boolean;
+  detail: string | null;
+  critical: boolean;
+}
+
+/** `GET /readyz`. Returned with a 503 when a critical dependency is down. */
+export interface ReadinessView {
+  status: "ready" | "not_ready";
+  checks: Record<string, ReadinessCheck>;
+  degraded: string[];
+}

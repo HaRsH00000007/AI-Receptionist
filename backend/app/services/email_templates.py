@@ -10,6 +10,7 @@ Every message is escaped. A business name is user input, and it reaches an inbox
 from __future__ import annotations
 
 from html import escape
+from typing import Any
 
 from app.schemas.agent_config import CallSummary
 
@@ -141,3 +142,56 @@ def call_summary_email(
     text_lines += ["", f"See all calls: {status_url}"]
 
     return subject, html, "\n".join(text_lines)
+
+
+# ---------------------------------------------------------------------------
+# Rendering by id
+# ---------------------------------------------------------------------------
+#: Template ids the outbox stores on a notification row.
+#:
+#: Ids rather than rendered bodies, because the row outlives the send: a
+#: notification queued before a deploy is rendered by the *new* template when it
+#: is finally delivered, and a stored body would have frozen the old wording —
+#: including any mistake that the deploy was fixing.
+TEMPLATE_ACTIVATION = "activation.v1"
+TEMPLATE_FAILURE = "failure.v1"
+TEMPLATE_CALL_SUMMARY = "call_summary.v1"
+
+
+def render_template(template_id: str, variables: dict[str, Any]) -> tuple[str, str, str]:
+    """Render a stored notification into subject, HTML and text.
+
+    Raises :class:`ValueError` for an unknown id or missing variables. That is
+    deliberately a *non-retryable* failure in the outbox: re-sending a template
+    that does not exist will never start working, and retrying it for two hours
+    only delays the operator noticing.
+    """
+    try:
+        match template_id:
+            case "activation.v1":
+                return activation_email(
+                    business_name=str(variables["business_name"]),
+                    phone_e164=str(variables["phone_e164"]),
+                    status_url=str(variables["status_url"]),
+                )
+            case "failure.v1":
+                return failure_email(
+                    business_name=str(variables["business_name"]),
+                    reason=str(variables["reason"]),
+                    status_url=str(variables["status_url"]),
+                )
+            case "call_summary.v1":
+                return call_summary_email(
+                    business_name=str(variables["business_name"]),
+                    caller_number=(
+                        str(variables["caller_number"])
+                        if variables.get("caller_number") is not None
+                        else None
+                    ),
+                    summary=CallSummary.model_validate(variables["summary"]),
+                    status_url=str(variables["status_url"]),
+                )
+            case _:
+                raise ValueError(f"unknown notification template: {template_id}")
+    except KeyError as exc:
+        raise ValueError(f"template {template_id} is missing variable {exc}") from exc

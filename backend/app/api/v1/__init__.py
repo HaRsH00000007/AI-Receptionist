@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
-from app.api.v1 import admin, auth, signups, tenants, webhooks
+from app.api.v1 import admin, auth, signups, tenants, voice, webhooks
 
 router = APIRouter()
 # Auth first: it is the only unauthenticated group, and reading it first
@@ -18,6 +18,9 @@ router.include_router(auth.router)
 router.include_router(signups.router)
 router.include_router(tenants.router)
 router.include_router(webhooks.router)
+# The audible call path. Unauthenticated like the webhooks, and verified the
+# same way — Twilio's signature is what stops anyone choosing whose agent answers.
+router.include_router(voice.router)
 router.include_router(admin.router)
 
 __all__ = ["router"]

@@ -23,12 +23,14 @@ from app.core.correlation import new_correlation_id, reset_correlation_id, set_c
 from app.core.errors import AppError
 from app.core.logging import get_logger
 from app.models import Call, Tenant
-from app.models.enums import CallStatus
+from app.models.enums import CallStatus, NotificationKind
 from app.providers.registry import Providers
 from app.provisioning.retry import next_attempt_at, should_retry
 from app.schemas.agent_config import CallSummary
-from app.services.notifications import NotificationService
+from app.services.email_templates import TEMPLATE_CALL_SUMMARY
+from app.services.notification_outbox import NotificationOutbox, call_summary_key
 from app.services.summarizer import Summarizer
+from app.services.usage import UsageService
 
 logger = get_logger(__name__)
 
@@ -91,10 +93,37 @@ class CallProcessor:
         call.attempt += 1
         await session.commit()
 
+        # Metered before summarization, and separately from it. A call that
+        # happened was used, whether or not the LLM can describe it — metering
+        # it only on the success path would silently under-bill every call whose
+        # summary failed. Keyed on the provider's call id, so the retries below
+        # cannot count the same call twice.
+        #
+        # Staged, not committed: the row rides along on whichever commit this
+        # attempt reaches. Committing here would expire the call and tenant
+        # mid-flight and make the metering step change how the rest behaves.
+        await self._meter(session, call, tenant)
+
         try:
             summary = await self._ensure_summary(session, call, tenant)
-            await NotificationService(self.providers.email, self.settings).send_call_summary(
-                tenant=tenant, call=call, summary=summary
+            # Queued, not sent. The obligation becomes durable here and the
+            # worker delivers it, so a provider outage leaves something to
+            # retry rather than an exception in a log — and a redelivered
+            # webhook collides on the dedupe key instead of emailing twice.
+            await NotificationOutbox(self.settings).enqueue(
+                session,
+                tenant_id=tenant.id,
+                kind=NotificationKind.CALL_SUMMARY,
+                recipient=tenant.contact_email,
+                template_id=TEMPLATE_CALL_SUMMARY,
+                template_vars={
+                    "business_name": tenant.name,
+                    "caller_number": call.from_e164,
+                    "summary": summary.model_dump(mode="json"),
+                    "status_url": f"{self.settings.public_app_url.rstrip('/')}/status/{tenant.id}",
+                },
+                call_id=call.id,
+                dedupe_key=call_summary_key(call.id),
             )
         except Exception as exc:  # noqa: BLE001 - classified below
             return await self._handle_failure(session, call.id, exc)
@@ -109,6 +138,33 @@ class CallProcessor:
             extra={"call_id": str(call.id), "tenant_id": str(tenant.id)},
         )
         return CallReport(call.id, "notified", call.status)
+
+    async def _meter(self, session: AsyncSession, call: Call, tenant: Tenant) -> None:
+        """Record this call's minutes, exactly once.
+
+        Failure here is logged and swallowed: a metering problem must not stop a
+        customer being told about their call. The ledger is append-only and
+        reconciled against provider usage reports later, so a missed row is a
+        correctable discrepancy rather than lost work — whereas an undelivered
+        message is a lost customer.
+        """
+        if not call.duration_s:
+            return
+        try:
+            await UsageService(session).record_call(
+                tenant_id=tenant.id,
+                call_id=call.id,
+                duration_s=call.duration_s,
+                provider_call_id=call.provider_call_id,
+                occurred_at=call.started_at,
+            )
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            logger.exception(
+                "could not meter a call; the ledger will be reconciled later",
+                extra={"call_id": str(call.id), "tenant_id": str(tenant.id)},
+            )
 
     async def _ensure_summary(
         self, session: AsyncSession, call: Call, tenant: Tenant

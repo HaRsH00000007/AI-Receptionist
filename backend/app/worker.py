@@ -29,6 +29,7 @@ import asyncio
 import contextlib
 import signal
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
@@ -38,6 +39,9 @@ from app.db.session import create_engine, create_session_factory
 from app.providers.registry import Providers, build_providers
 from app.provisioning.engine import ProvisioningEngine, claim_runs
 from app.services.call_processor import CallProcessor, claim_calls
+from app.services.notification_outbox import NotificationOutbox
+from app.services.retention import RetentionService
+from app.services.usage import rebuild_recent_rollups
 
 logger = get_logger(__name__)
 
@@ -49,6 +53,8 @@ class WorkerStats:
     polls: int = 0
     steps_executed: int = 0
     calls_processed: int = 0
+    notifications_delivered: int = 0
+    maintenance_runs: int = 0
 
 
 class Worker:
@@ -65,6 +71,10 @@ class Worker:
         self.session_factory = session_factory
         self.engine = ProvisioningEngine(settings, providers)
         self.calls = CallProcessor(settings, providers)
+        self.outbox = NotificationOutbox(settings)
+        # Epoch, so the first tick runs maintenance immediately rather than
+        # waiting an interval after a deploy.
+        self._last_maintenance = datetime.fromtimestamp(0, tz=UTC)
         self.stats = WorkerStats()
         self._stopping = asyncio.Event()
 
@@ -112,7 +122,60 @@ class Worker:
                 await self.calls.process(session, call_id)
             self.stats.calls_processed += 1
 
+        # The notification outbox. Delivered here rather than inline so that a
+        # slow or failing email provider cannot make a webhook time out and be
+        # redelivered — and so an undeliverable message stays visible as an
+        # unmet obligation instead of vanishing into a log line.
+        async with self.session_factory() as session:
+            notification_ids = await self.outbox.claim_due(
+                session,
+                batch_size=self.settings.worker_batch_size,
+                lease_s=self.settings.provisioning_step_timeout_s,
+            )
+
+        for notification_id in notification_ids:
+            async with self.session_factory() as session:
+                await self.outbox.deliver(session, notification_id, self.providers.email)
+            self.stats.notifications_delivered += 1
+
+        await self._maintenance()
         return self.stats
+
+    # ---- periodic maintenance -------------------------------------------
+    async def _maintenance(self) -> None:
+        """Retention and usage rollups, run on a slow cadence.
+
+        In this loop rather than in a separate cron container, because a
+        retention policy that depends on someone remembering to deploy a
+        scheduler is a retention policy that silently stops running. Everything
+        here is idempotent and batched, so running it often is cheap and
+        skipping a tick costs nothing.
+
+        Failures are logged and swallowed: a retention problem must not stop the
+        worker from summarizing calls and sending mail, which is the work
+        customers actually notice.
+        """
+        moment = datetime.now(UTC)
+        if moment - self._last_maintenance < timedelta(
+            seconds=self.settings.maintenance_interval_s
+        ):
+            return
+        self._last_maintenance = moment
+        self.stats.maintenance_runs += 1
+
+        try:
+            async with self.session_factory() as session:
+                report = await RetentionService(session, self.settings).sweep()
+            if report.transcripts_redacted or report.recordings_marked:
+                logger.info("retention applied", extra=report.as_dict())
+        except Exception:
+            logger.exception("the retention sweep failed; it will run again next tick")
+
+        try:
+            async with self.session_factory() as session:
+                await rebuild_recent_rollups(session)
+        except Exception:
+            logger.exception("the usage rollup failed; totals still read the ledger")
 
     # ---- the loop --------------------------------------------------------
     async def run_forever(self) -> None:

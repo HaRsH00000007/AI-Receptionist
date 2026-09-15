@@ -24,7 +24,7 @@ async def test_healthz_reports_the_service(client: AsyncClient) -> None:
 async def test_readyz_is_ready_with_no_dependencies(client: AsyncClient) -> None:
     response = await client.get("/readyz")
     assert response.status_code == 200
-    assert response.json() == {"status": "ready", "checks": {}}
+    assert response.json() == {"status": "ready", "checks": {}, "degraded": []}
 
 
 async def _get_readyz(app: FastAPI) -> tuple[int, Any]:
@@ -42,7 +42,11 @@ async def test_readyz_passes_when_checks_pass(app: FastAPI) -> None:
 
     status_code, body = await _get_readyz(app)
     assert status_code == 200
-    assert body == {"status": "ready", "checks": {"database": {"ok": True, "detail": None}}}
+    assert body == {
+        "status": "ready",
+        "checks": {"database": {"ok": True, "detail": None, "critical": True}},
+        "degraded": [],
+    }
 
 
 async def test_readyz_returns_503_when_a_check_fails(app: FastAPI) -> None:
@@ -54,7 +58,9 @@ async def test_readyz_returns_503_when_a_check_fails(app: FastAPI) -> None:
     status_code, body = await _get_readyz(app)
     assert status_code == 503
     assert body["status"] == "not_ready"
-    assert body["checks"] == {"database": {"ok": False, "detail": "connection refused"}}
+    assert body["checks"] == {
+        "database": {"ok": False, "detail": "connection refused", "critical": True}
+    }
 
 
 async def test_readyz_survives_a_check_that_raises(app: FastAPI) -> None:
@@ -67,7 +73,9 @@ async def test_readyz_survives_a_check_that_raises(app: FastAPI) -> None:
 
     status_code, body = await _get_readyz(app)
     assert status_code == 503
-    assert body["checks"] == {"database": {"ok": False, "detail": "driver exploded"}}
+    assert body["checks"] == {
+        "database": {"ok": False, "detail": "driver exploded", "critical": True}
+    }
 
 
 async def test_healthz_stays_up_when_a_dependency_is_down(app: FastAPI) -> None:
@@ -82,3 +90,46 @@ async def test_healthz_stays_up_when_a_dependency_is_down(app: FastAPI) -> None:
     async with AsyncClient(transport=transport, base_url="http://testserver") as client:
         assert (await client.get("/healthz")).status_code == 200
         assert (await client.get("/readyz")).status_code == 503
+
+
+async def test_a_failing_non_critical_dependency_stays_ready(app: FastAPI) -> None:
+    """Not everything we depend on is load-bearing.
+
+    A cache outage degrades latency, never correctness — every cache read has a
+    PostgreSQL fallback. A replica that withdrew itself over one would convert
+    a slow service into no service, so it is reported and keeps serving.
+    """
+
+    async def database() -> None:
+        return None
+
+    async def redis() -> str:
+        return "redis is not reachable"
+
+    app.state.readiness.register("database", database)
+    app.state.readiness.register("redis", redis, critical=False)
+
+    status_code, body = await _get_readyz(app)
+    assert status_code == 200
+    assert body["status"] == "ready"
+    assert body["degraded"] == ["redis"]
+    assert body["checks"]["redis"]["ok"] is False
+
+
+async def test_a_failing_critical_dependency_still_withdraws_the_replica(
+    app: FastAPI,
+) -> None:
+    """The non-critical escape hatch must not weaken the critical path."""
+
+    async def database() -> str:
+        return "connection refused"
+
+    async def redis() -> None:
+        return None
+
+    app.state.readiness.register("database", database)
+    app.state.readiness.register("redis", redis, critical=False)
+
+    status_code, body = await _get_readyz(app)
+    assert status_code == 503
+    assert body["status"] == "not_ready"

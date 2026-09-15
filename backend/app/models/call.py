@@ -53,6 +53,15 @@ class Call(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     #: path and should not invent a schema for someone else's payload.
     transcript_json: Mapped[dict[str, Any] | None] = mapped_column(nullable=True)
 
+    #: Which version of the tenant's agent config served this call.
+    #:
+    #: Recorded rather than joined, because the answer must not change. Looking
+    #: up "the live config" months later would report whatever is live *then* —
+    #: so a complaint about what the receptionist said would be answered with a
+    #: prompt that was published after the call. Nullable for calls that predate
+    #: the column, and for a call that arrives before any config is live.
+    agent_config_version: Mapped[int | None] = mapped_column(nullable=True)
+
     summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     caller_name: Mapped[str | None] = mapped_column(String(200), nullable=True)
     callback_number: Mapped[str | None] = mapped_column(String(32), nullable=True)

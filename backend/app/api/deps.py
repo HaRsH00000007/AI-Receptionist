@@ -11,7 +11,10 @@ from typing import Annotated
 from fastapi import Depends, Request
 from temporalio.client import Client
 
+from app.cache import CacheClient, DistributedRateLimiter
 from app.core.config import Settings
+from app.core.metrics import MetricsRegistry
+from app.providers.circuit import CircuitRegistry
 from app.providers.registry import Providers
 
 
@@ -51,3 +54,51 @@ def get_temporal_client(request: Request) -> Client | None:
 
 
 TemporalClientDep = Annotated["Client | None", Depends(get_temporal_client)]
+
+
+def get_cache(request: Request) -> CacheClient:
+    """The cache this application resolved at startup.
+
+    Always present, even when Redis is disabled — in that case it is a client
+    that reports ``UNKNOWN`` for everything, so callers take their PostgreSQL
+    fallback without needing to know why.
+    """
+    cache: CacheClient = request.app.state.cache
+    return cache
+
+
+CacheDep = Annotated[CacheClient, Depends(get_cache)]
+
+
+def get_signup_rate_limiter(request: Request) -> DistributedRateLimiter:
+    limiter: DistributedRateLimiter = request.app.state.signup_rate_limiter
+    return limiter
+
+
+SignupRateLimiterDep = Annotated[DistributedRateLimiter, Depends(get_signup_rate_limiter)]
+
+
+def get_login_rate_limiter(request: Request) -> DistributedRateLimiter:
+    limiter: DistributedRateLimiter = request.app.state.login_rate_limiter
+    return limiter
+
+
+LoginRateLimiterDep = Annotated[DistributedRateLimiter, Depends(get_login_rate_limiter)]
+
+
+def get_metrics(request: Request) -> MetricsRegistry:
+    """This application's metrics registry."""
+    registry: MetricsRegistry = request.app.state.metrics
+    return registry
+
+
+MetricsDep = Annotated[MetricsRegistry, Depends(get_metrics)]
+
+
+def get_circuits(request: Request) -> CircuitRegistry:
+    """This process's vendor circuit breakers."""
+    circuits: CircuitRegistry = request.app.state.circuits
+    return circuits
+
+
+CircuitsDep = Annotated[CircuitRegistry, Depends(get_circuits)]

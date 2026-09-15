@@ -14,14 +14,14 @@ those still behave identically with Groq underneath, the abstraction held.
 from __future__ import annotations
 
 import uuid
-from typing import Any
+from typing import Any, ClassVar
 
 import httpx
 import pytest
 from pydantic import ValidationError
 
 from app.core.errors import VendorError
-from app.models.enums import AgentConfigSource
+from app.models.enums import AgentConfigSource, BusinessType, GreetingStyle
 from app.providers.http import ProviderHTTPClient
 from app.providers.real.llm import AnthropicProvider, GroqProvider, OpenAIProvider
 from app.providers.registry import build_providers
@@ -77,16 +77,30 @@ def completion(content: str, *, model: str = GROQ_CONFIG_MODEL) -> dict[str, Any
 
 VALID_CONFIG_JSON = """
 {
-  "system_prompt": "You are the receptionist for Sunset Salon, a salon.",
+  "business_summary": "Sunset Salon is a hair salon offering cuts and colour.",
+  "services": ["haircut", "colour"],
+  "hours": {
+    "timezone": "America/Los_Angeles",
+    "days": [
+      {"day": "monday", "closed": true},
+      {"day": "tuesday", "opens_at": "09:00", "closes_at": "18:00"},
+      {"day": "wednesday", "opens_at": "09:00", "closes_at": "18:00"},
+      {"day": "thursday", "opens_at": "09:00", "closes_at": "18:00"},
+      {"day": "friday", "opens_at": "09:00", "closes_at": "18:00"},
+      {"day": "saturday", "opens_at": "10:00", "closes_at": "16:00"},
+      {"day": "sunday", "closed": true}
+    ]
+  },
   "greeting": "Thanks for calling Sunset Salon, how can I help?",
-  "voice_style": "friendly",
-  "faq": [{"question": "Do you do colour?", "answer": "Yes, we do."}],
-  "escalation_triggers": ["complaint"],
+  "tone": "friendly",
+  "escalation": {
+    "default_mode": "take_message",
+    "rules": [{"when": "complaint", "mode": "notify_owner"}],
+    "notify_email": "owner@sunset-salon.example"
+  },
+  "call_handling_instructions": ["Take a message when unsure."],
   "fallback_behavior": "Take a message and pass it to the owner.",
-  "business_hours": {
-    "monday": "9-6", "tuesday": "9-6", "wednesday": "9-6",
-    "thursday": "9-6", "friday": "9-6", "saturday": "closed", "sunday": "closed"
-  }
+  "faq": [{"question": "Do you do colour?", "answer": "Yes, we do."}]
 }
 """
 
@@ -96,8 +110,12 @@ VALID_SUMMARY_JSON = """
   "intent": "booking_request",
   "caller_name": "Dana",
   "callback_number": "+15559998888",
-  "action_required": true,
-  "sentiment": "positive"
+  "reason_for_call": "Wants a Thursday morning appointment.",
+  "key_details": ["Prefers mornings"],
+  "requested_follow_up": "Call back to confirm the slot.",
+  "urgency": 2,
+  "needs_human": false,
+  "ai_handled_successfully": true
 }
 """
 
@@ -234,19 +252,27 @@ def test_dry_run_does_not_force_the_llm_to_fake() -> None:
 
 
 class _Tenant:
+    """A stand-in for the ORM row, with the same *types* the model declares.
+
+    Enums rather than their string values, because `ConfigGenerator` reads
+    `.value` off them. A str stub would pass a weaker contract than production
+    and hide exactly the kind of drift that broke this file once already.
+    """
+
     id = uuid.uuid4()
     name = "Sunset Salon"
-    business_type = "salon"
+    business_type = BusinessType.SALON
     timezone = "America/Los_Angeles"
+    contact_email = "owner@sunset-salon.example"
 
 
 class _Profile:
-    services = "cuts, colour"
-    hours_json: dict[str, Any] | None = None
-    greeting_style = "friendly"
-    escalation_rules = ""
-    business_type = "salon"
-    extra_json: dict[str, Any] | None = None
+    services: ClassVar[list[str]] = ["cuts", "colour"]
+    hours_raw: str | None = "Tue-Sat 9-6"
+    hours_json: ClassVar[dict[str, Any] | None] = None
+    greeting_style = GreetingStyle.FRIENDLY
+    escalation_raw: str | None = None
+    escalation_json: ClassVar[dict[str, Any] | None] = None
 
 
 async def test_a_valid_groq_reply_becomes_a_validated_config() -> None:
@@ -259,7 +285,7 @@ async def test_a_valid_groq_reply_becomes_a_validated_config() -> None:
 
     assert outcome.source is AgentConfigSource.LLM
     assert isinstance(outcome.config, GeneratedAgentConfig)
-    assert "Sunset Salon" in outcome.config.system_prompt
+    assert "Sunset Salon" in outcome.config.business_summary
     # The model that answered is recorded on the config row.
     assert outcome.detail == GROQ_CONFIG_MODEL
 
@@ -336,7 +362,8 @@ async def test_a_summary_validates_against_the_existing_contract() -> None:
     )
 
     assert summary.intent == "booking_request"
-    assert summary.action_required is True
+    assert summary.needs_human is False
+    assert summary.urgency == 2
     # The summary model setting is what was sent, not the config model.
     assert recorder.body()["model"] == GROQ_SUMMARY_MODEL
 

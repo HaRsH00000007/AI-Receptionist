@@ -123,7 +123,7 @@ async def request_magic_link(
 
     Always 202. See the module docstring for why the response cannot vary.
     """
-    request.app.state.login_limiter.check(_login_limiter_key(request, payload.email))
+    await request.app.state.login_rate_limiter.check(_login_limiter_key(request, payload.email))
 
     issued = await AuthService(session, settings).request_magic_link(
         payload.email,

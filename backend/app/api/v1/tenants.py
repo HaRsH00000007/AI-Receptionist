@@ -17,8 +17,10 @@ two are compared by the dependency, never by the handler.
 from __future__ import annotations
 
 import uuid
+from typing import Any
 
 from fastapi import APIRouter, Query
+from pydantic import BaseModel, ValidationError
 from sqlalchemy import select
 
 from app.api.auth_deps import TenantReadDep
@@ -26,17 +28,22 @@ from app.api.deps import SettingsDep
 from app.core.errors import NotFoundError
 from app.db.session import SessionDep
 from app.models import Agent, AgentConfig, Call, PhoneNumber, ProvisioningRun, Tenant
+from app.models.business_profile import BusinessProfile
 from app.models.enums import STEP_SEQUENCE, AgentStatus, PhoneNumberStatus, StepStatus
+from app.schemas.business import BusinessHours, EscalationPolicy
 from app.schemas.views import (
     AgentView,
     BillingView,
+    BusinessProfileView,
     CallView,
     PhoneNumberView,
     ProvisioningView,
     StepView,
     TenantView,
+    UsageView,
 )
 from app.services.billing_gate import BillingDecision, evaluate
+from app.services.usage import UsageService
 
 router = APIRouter(prefix="/tenants", tags=["tenants"])
 
@@ -62,6 +69,54 @@ async def get_tenant(tenant_id: TenantReadDep, session: SessionDep) -> TenantVie
         area_code=tenant.area_code,
         created_at=tenant.created_at,
     )
+
+
+@router.get(
+    "/{tenant_id}/profile",
+    response_model=BusinessProfileView,
+    summary="What the receptionist knows about the business",
+)
+async def get_profile(tenant_id: TenantReadDep, session: SessionDep) -> BusinessProfileView:
+    await _load_tenant(session, tenant_id)
+    profile = (
+        await session.execute(select(BusinessProfile).where(BusinessProfile.tenant_id == tenant_id))
+    ).scalar_one_or_none()
+    if profile is None:
+        raise NotFoundError("tenant has no business profile", details={"tenant_id": str(tenant_id)})
+
+    config = (
+        await session.execute(
+            select(AgentConfig)
+            .where(AgentConfig.tenant_id == tenant_id)
+            .where(AgentConfig.is_live.is_(True))
+        )
+    ).scalar_one_or_none()
+
+    return BusinessProfileView(
+        services=list(profile.services),
+        hours_raw=profile.hours_raw,
+        hours=_stored(BusinessHours, profile.hours_json),
+        greeting_style=profile.greeting_style,
+        escalation_raw=profile.escalation_raw,
+        escalation=_stored(EscalationPolicy, profile.escalation_json),
+        greeting=config.first_message if config else None,
+        config_version=config.version if config else None,
+    )
+
+
+def _stored[M: BaseModel](model: type[M], document: dict[str, Any] | None) -> M | None:
+    """Read a JSONB column back through its schema.
+
+    A document that no longer validates is reported as absent rather than
+    failing the whole read: the raw text beside it is still the truth, and a
+    customer's settings page going blank over one stale column would be worse.
+    """
+    if document is None:
+        return None
+    try:
+        return model.model_validate(document)
+    except ValidationError:
+        return None
 
 
 @router.get(
@@ -218,3 +273,29 @@ async def list_calls(
         )
         for call in calls
     ]
+
+
+@router.get("/{tenant_id}/usage", response_model=UsageView, summary="Usage this period")
+async def get_usage(tenant_id: TenantReadDep, session: SessionDep) -> UsageView:
+    """This billing period's usage, measured against the tenant's plan.
+
+    Read from the ledger rather than the daily rollup. The rollup is a cache for
+    charts; anything a customer might compare against an invoice reads the
+    source, because a half-rebuilt rollup would be an invisible way to show the
+    wrong number.
+    """
+    tenant = await _load_tenant(session, tenant_id)
+    usage = await UsageService(session).current_period(tenant)
+
+    return UsageView(
+        period_start=usage.totals.period_start,
+        period_end=usage.totals.period_end,
+        call_count=usage.totals.call_count,
+        call_minutes=usage.totals.call_minutes,
+        included_minutes=usage.included_minutes,
+        percent_used=usage.percent_used,
+        over_limit=usage.over_limit,
+        warning=usage.should_warn,
+        blocks_on_overage=usage.capabilities.block_on_overage,
+        plan=usage.plan.value,
+    )

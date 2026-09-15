@@ -22,7 +22,7 @@ from temporalio.client import Client
 
 from app.api.deps import ProvidersDep, SettingsDep, TemporalClientDep
 from app.core.config import Settings
-from app.core.errors import AppError, NotFoundError
+from app.core.errors import AppError, InvalidInputError, NotFoundError
 from app.core.logging import get_logger
 from app.db.session import SessionDep
 from app.models import Agent, AgentConfig, ProvisioningRun, ProvisioningStepRecord, Tenant
@@ -36,7 +36,13 @@ from app.models.enums import (
     TenantStatus,
 )
 from app.provisioning.compensation import compensate_run
-from app.schemas.views import ActionResult, RunSummaryView
+from app.schemas.views import (
+    ActionResult,
+    AgentConfigDetailView,
+    AgentConfigView,
+    RunSummaryView,
+)
+from app.services.config_versions import ConfigVersionService
 from app.services.idempotency import step_idempotency_key, tenant_resource_name
 from app.temporal.client import start_provisioning
 
@@ -302,6 +308,18 @@ async def resync_agent(
     if agent is None or not agent.elevenlabs_agent_id:
         raise NotFoundError("tenant has no active agent", details={"tenant_id": str(tenant_id)})
 
+    if agent.is_shared:
+        # Refused, not quietly skipped. Pushing this tenant's prompt onto a
+        # shared vertical agent would overwrite the prompt every other tenant on
+        # that vertical is being served by — one operator click causing a
+        # fleet-wide incident. A shared agent's prompt is changed deliberately,
+        # as a fleet operation, never as a side effect of fixing one customer.
+        raise InvalidInputError(
+            "this tenant is served by a shared vertical agent, which must not be "
+            "overwritten with one tenant's configuration",
+            details={"tenant_id": str(tenant_id), "agent_id": agent.elevenlabs_agent_id},
+        )
+
     config = (
         await session.execute(
             select(AgentConfig)
@@ -329,3 +347,101 @@ async def resync_agent(
         extra={"tenant_id": str(tenant_id), "config_version": config.version},
     )
     return ActionResult(ok=True, detail=f"agent resynced to config v{config.version}")
+
+
+@router.get(
+    "/tenants/{tenant_id}/configs",
+    response_model=list[AgentConfigView],
+    summary="The history of a tenant's agent configurations",
+)
+async def list_configs(
+    tenant_id: uuid.UUID,
+    session: SessionDep,
+    settings: SettingsDep,
+    x_admin_key: str | None = Header(default=None),
+    limit: int = Query(default=50, ge=1, le=200),
+) -> list[AgentConfigView]:
+    """Every version this tenant has had, newest first.
+
+    The audit answer to "what have we been telling this agent, and since when?".
+    """
+    _authorize(settings, x_admin_key)
+
+    configs = await ConfigVersionService(session).history(tenant_id, limit=limit)
+    return [_config_view(config) for config in configs]
+
+
+@router.get(
+    "/tenants/{tenant_id}/configs/{version}",
+    response_model=AgentConfigDetailView,
+    summary="One agent configuration version, including its prompt",
+)
+async def get_config(
+    tenant_id: uuid.UUID,
+    version: int,
+    session: SessionDep,
+    settings: SettingsDep,
+    x_admin_key: str | None = Header(default=None),
+) -> AgentConfigDetailView:
+    _authorize(settings, x_admin_key)
+
+    config = await ConfigVersionService(session).get_version(tenant_id, version)
+    if config is None:
+        raise NotFoundError(
+            "no such config version",
+            details={"tenant_id": str(tenant_id), "version": version},
+        )
+    return AgentConfigDetailView(
+        **_config_view(config).model_dump(),
+        system_prompt=config.system_prompt,
+        first_message=config.first_message,
+        model_params=config.model_params_json,
+    )
+
+
+@router.post(
+    "/tenants/{tenant_id}/configs/{version}/rollback",
+    response_model=ActionResult,
+    summary="Make an earlier configuration version live again",
+)
+async def rollback_config(
+    tenant_id: uuid.UUID,
+    version: int,
+    session: SessionDep,
+    settings: SettingsDep,
+    x_admin_key: str | None = Header(default=None),
+) -> ActionResult:
+    """Roll back to a previous prompt.
+
+    Deliberately does **not** call ElevenLabs. Moving the flag is the whole
+    operation and it must succeed even when the vendor is unreachable — which
+    is exactly when retiring a bad prompt is most urgent. Pushing the restored
+    prompt to the vendor is the separate, retryable `resync-agent` action, and
+    until it runs the vendor is simply out of date, which is a discrepancy the
+    resync fixes rather than a loss.
+    """
+    _authorize(settings, x_admin_key)
+
+    tenant = await session.get(Tenant, tenant_id)
+    if tenant is None:
+        raise NotFoundError("tenant not found", details={"tenant_id": str(tenant_id)})
+
+    config = await ConfigVersionService(session).rollback_to(tenant_id=tenant_id, version=version)
+    await session.commit()
+
+    return ActionResult(
+        ok=True,
+        detail=(f"config v{config.version} is live; run resync-agent to push it to the vendor"),
+    )
+
+
+def _config_view(config: AgentConfig) -> AgentConfigView:
+    return AgentConfigView(
+        version=config.version,
+        is_live=config.is_live,
+        generated_by=config.generated_by.value,
+        generator_detail=config.generator_detail,
+        template_version=config.template_version,
+        voice_id=config.voice_id,
+        created_at=config.created_at,
+    )

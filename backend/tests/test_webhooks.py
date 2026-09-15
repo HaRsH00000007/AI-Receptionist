@@ -205,11 +205,21 @@ async def test_a_new_event_id_for_a_known_call_is_still_a_duplicate(
         assert len((await session.execute(select(Call))).scalars().all()) == 1
 
 
-async def test_an_invalid_signature_is_recorded_not_trusted(
+async def test_a_signature_that_is_present_and_wrong_is_refused_everywhere(
     api_client: AsyncClient, api_app: FastAPI
 ) -> None:
-    """Outside production the delivery is accepted but flagged, so a
-    misconfigured secret is visible rather than silent."""
+    """Hardened in M18. A *wrong* signature is never benign.
+
+    The environment-dependent leniency exists so a local DRY_RUN loop works with
+    no secret configured — that is an *absent* signature. A present-and-wrong
+    one is a forgery attempt, a replay outside its window, or a rotated secret,
+    and processing it would let anyone who guessed a customer's number inject a
+    transcript that reaches the summarizer, the customer's inbox and the usage
+    ledger.
+
+    Nothing is stored, either: writing attacker-controlled content into a table
+    the admin panel renders is how a webhook becomes an injection vector.
+    """
     _, e164 = await provision_tenant(api_client, api_app)
     body = json.dumps(post_call_payload(called=e164)).encode()
 
@@ -217,6 +227,35 @@ async def test_an_invalid_signature_is_recorded_not_trusted(
         POST_CALL_URL,
         content=body,
         headers={"elevenlabs-signature": "t=1,v0=deadbeef", "content-type": "application/json"},
+    )
+
+    # Still 200: a 4xx would make the provider retry a payload that can never
+    # succeed, which turns a rejection into a retry storm.
+    assert response.status_code == 200
+    assert response.json()["status"] == "rejected"
+
+    async with api_app.state.session_factory() as session:
+        events = (await session.execute(select(WebhookEvent))).scalars().all()
+        calls = (await session.execute(select(Call))).scalars().all()
+    assert events == []
+    assert calls == []
+
+
+async def test_an_absent_signature_is_still_recorded_and_flagged_locally(
+    api_client: AsyncClient, api_app: FastAPI
+) -> None:
+    """The local-development path the leniency exists for.
+
+    With no signature sent and none required, the delivery is processed but
+    recorded as unverified — so a misconfigured secret in a real deployment is
+    visible in the audit trail rather than silently indistinguishable from a
+    verified one.
+    """
+    _, e164 = await provision_tenant(api_client, api_app)
+    body = json.dumps(post_call_payload(called=e164)).encode()
+
+    response = await api_client.post(
+        POST_CALL_URL, content=body, headers={"content-type": "application/json"}
     )
 
     assert response.status_code == 200
@@ -305,7 +344,10 @@ async def test_twilio_status_callbacks_are_recorded(
     async with api_app.state.session_factory() as session:
         event = (await session.execute(select(WebhookEvent))).scalar_one()
     assert event.event_type == "completed"
-    assert event.event_id == "CallSid:CA123"
+    # The status is part of the identity: the same call legitimately reports
+    # `ringing` and then `completed`, and collapsing those into one event would
+    # drop a real status change as though it were a redelivery.
+    assert event.event_id == "CallSid:CA123:completed"
 
 
 async def test_a_repeated_twilio_callback_is_a_duplicate(api_client: AsyncClient) -> None:

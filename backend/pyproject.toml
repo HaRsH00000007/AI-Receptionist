@@ -18,6 +18,9 @@ dependencies = [
     "asyncpg>=0.30",
     "alembic>=1.14",
     "temporalio>=1.8",
+    # Cache, distributed locks, rate limiting and webhook dedupe. Never the
+    # source of truth: every read here has a PostgreSQL fallback.
+    "redis>=5.2",
 ]
 
 [dependency-groups]

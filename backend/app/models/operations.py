@@ -113,6 +113,16 @@ class Notification(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     template_id: Mapped[str] = mapped_column(String(64), nullable=False)
     template_vars_json: Mapped[dict[str, Any]] = mapped_column(nullable=False, default=dict)
 
+    #: What makes this notification *this* notification.
+    #:
+    #: Without it, a redelivered post-call webhook produces a second row and the
+    #: customer gets the same call summary twice — the exact failure the webhook
+    #: dedupe exists to prevent, reintroduced one layer down. Derived from the
+    #: thing being announced (a call id, a provisioning run) rather than
+    #: generated, so two independent attempts to announce the same event
+    #: collide by construction.
+    dedupe_key: Mapped[str | None] = mapped_column(String(200), nullable=True)
+
     attempt: Mapped[int] = mapped_column(nullable=False, default=0)
     next_attempt_at: Mapped[datetime | None] = mapped_column(nullable=True)
     sent_at: Mapped[datetime | None] = mapped_column(nullable=True)
@@ -126,6 +136,14 @@ class Notification(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         # The sender's claim query: what is due, oldest first.
         Index("ix_notifications_status_next_attempt_at", "status", "next_attempt_at"),
         Index("ix_notifications_tenant_id_created_at", "tenant_id", "created_at"),
+        # One notification per announceable event. Partial, because a row with
+        # no dedupe key is a one-off that nothing else will try to send.
+        Index(
+            "uq_notifications_dedupe_key",
+            "dedupe_key",
+            unique=True,
+            postgresql_where=text("dedupe_key IS NOT NULL"),
+        ),
     )
 
 

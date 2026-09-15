@@ -48,7 +48,12 @@ async def compensate_run(
     run.status = ProvisioningStatus.COMPENSATING
     await session.commit()
 
-    report: dict[str, object] = {"released_number": None, "deleted_agent": None, "errors": []}
+    report: dict[str, object] = {
+        "released_number": None,
+        "deleted_agent": None,
+        "detached_shared_agent": None,
+        "errors": [],
+    }
     errors: list[str] = []
 
     agent = (
@@ -58,7 +63,20 @@ async def compensate_run(
             .where(Agent.status == AgentStatus.ACTIVE)
         )
     ).scalar_one_or_none()
-    if agent is not None and agent.elevenlabs_agent_id:
+    if agent is not None and agent.is_shared:
+        # NEVER delete a shared vertical agent. It is serving every other tenant
+        # on this vertical, and deleting it to compensate one failed signup
+        # would take all of their receptionists down at once — turning a single
+        # customer's bad day into an outage. Detaching this tenant's row is the
+        # entire compensation: the tenant stops being routed there, and the
+        # agent is untouched because we never owned it exclusively.
+        agent.status = AgentStatus.DELETED
+        report["detached_shared_agent"] = agent.elevenlabs_agent_id
+        logger.info(
+            "detached a tenant from its shared agent; the agent itself is untouched",
+            extra={"tenant_id": str(tenant.id), "agent_id": agent.elevenlabs_agent_id},
+        )
+    elif agent is not None and agent.elevenlabs_agent_id:
         try:
             await providers.elevenlabs.delete_agent(agent_id=agent.elevenlabs_agent_id)
             report["deleted_agent"] = agent.elevenlabs_agent_id

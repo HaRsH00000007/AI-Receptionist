@@ -17,6 +17,19 @@ external side effects, no durable state, no idempotency and no visibility. Every
 design decision below exists to fix that *class* of problem, not just to move it
 to Python.
 
+> **Status: production migration M0–M20 complete.** Redis, the production
+> telephony path, shared vertical agents, config versioning and rollback,
+> webhook hardening, usage metering, retention, a durable notification outbox,
+> the customer dashboard, the operator console, metrics, circuit breakers, a
+> security suite and a full local end-to-end journey are all built and
+> validated — **799 backend tests, 53 frontend tests, zero skips**.
+>
+> Every vendor is a fake in the test suite, which is what makes that run
+> repeatable and free. See [what it does not
+> prove](docs/E2E_TESTING.md#what-it-does-not-prove) before reading the number
+> as production readiness. Per-module detail is in
+> [`docs/PRODUCTION_MIGRATION_PLAN.md`](docs/PRODUCTION_MIGRATION_PLAN.md).
+
 ---
 
 ## 1. Purpose
@@ -187,18 +200,29 @@ that fixed them.
 
 ## 9–11. Running it
 
-Three processes. Start the database first.
+Four processes since M4 moved orchestration to Temporal. Start the
+infrastructure first — `docker compose up -d` brings up PostgreSQL, Redis,
+Temporal, MinIO and Mailpit; `docker compose up -d db` is enough for the POC
+path alone.
+
+See [`docs/LOCAL_PRODUCTION_SETUP.md`](docs/LOCAL_PRODUCTION_SETUP.md) for the
+full local stack, including the Temporal UI and Mailpit.
 
 ```bash
-docker compose up -d db
+docker compose up -d
 
 # terminal 1 — API
 cd backend && uv run alembic upgrade head && uv run uvicorn app.asgi:app --reload --port 8000
 
-# terminal 2 — worker
+# terminal 2 — Temporal worker. This is what drives provisioning.
+cd backend && uv run python -m app.temporal.worker
+
+# terminal 3 — polling worker. Post-call processing, the notification outbox,
+# and the retention and usage-rollup maintenance pass. Under
+# ORCHESTRATOR=temporal it deliberately does not claim provisioning runs.
 cd backend && uv run python -m app.worker
 
-# terminal 3 — frontend
+# terminal 4 — frontend
 cd frontend && npm run dev
 ```
 
@@ -390,4 +414,10 @@ Ordered by value, largely following `docs/02_PLAN_PRODUCTION.md`:
 | [`docs/00_DECISIONS.md`](docs/00_DECISIONS.md) | Architecture decisions and rationale |
 | [`docs/01_PLAN_POC.md`](docs/01_PLAN_POC.md) | Plan A — the POC. The build spec. |
 | [`docs/02_PLAN_PRODUCTION.md`](docs/02_PLAN_PRODUCTION.md) | Plan B — production hardening |
+| [`docs/PRODUCTION_MIGRATION_PLAN.md`](docs/PRODUCTION_MIGRATION_PLAN.md) | **M0–M20, what each module did and why** |
+| [`docs/LOCAL_PRODUCTION_SETUP.md`](docs/LOCAL_PRODUCTION_SETUP.md) | Running the full local stack |
+| [`docs/TELEPHONY.md`](docs/TELEPHONY.md) | Both call paths, and what a caller hears when things break |
+| [`docs/WEBHOOKS.md`](docs/WEBHOOKS.md) | Webhook setup, signatures, replay protection |
+| [`docs/OPERATIONS.md`](docs/OPERATIONS.md) | Incident response, recovery, known gaps |
+| [`docs/E2E_TESTING.md`](docs/E2E_TESTING.md) | The full journey, and what it does not prove |
 | [`backend/README.md`](backend/README.md) | Backend conventions and workflow |

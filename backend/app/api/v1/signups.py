@@ -47,7 +47,7 @@ async def _submit(
     settings: Settings,
     temporal: TemporalClientDep,
 ) -> SignupResponse:
-    request.app.state.signup_limiter.check(_client_key(request))
+    await request.app.state.signup_rate_limiter.check(_client_key(request))
 
     correlation_id = get_correlation_id() or new_correlation_id()
     result = await SignupService(session, settings).submit(payload, correlation_id=correlation_id)

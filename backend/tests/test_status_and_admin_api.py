@@ -139,6 +139,48 @@ async def test_phone_is_404_before_provisioning(api_client: AsyncClient, api_app
     ).status_code == 404
 
 
+async def test_profile_shows_what_the_business_submitted(
+    api_client: AsyncClient, api_app: FastAPI
+) -> None:
+    tenant_id = await signup(api_client)
+    response = await api_client.get(
+        f"/api/v1/tenants/{tenant_id}/profile", params=grant(api_app, tenant_id)
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert [service.lower() for service in body["services"]] == ["cuts", "color"]
+    assert body["hours_raw"] == "Mon-Fri 9-6"
+    assert body["greeting_style"] == "friendly"
+    assert body["escalation_raw"] == "Text the owner for emergencies"
+    # No config is live before provisioning writes one.
+    assert body["greeting"] is None
+    assert body["config_version"] is None
+
+
+async def test_profile_carries_the_live_greeting_but_never_the_prompt(
+    api_client: AsyncClient, api_app: FastAPI
+) -> None:
+    tenant_id = await signup(api_client)
+    await drive_to_active(api_app)
+
+    body = (
+        await api_client.get(
+            f"/api/v1/tenants/{tenant_id}/profile", params=grant(api_app, tenant_id)
+        )
+    ).json()
+
+    assert body["greeting"]
+    assert body["config_version"] == 1
+    assert "system_prompt" not in body
+
+
+async def test_profile_requires_a_credential(api_client: AsyncClient) -> None:
+    tenant_id = await signup(api_client)
+    response = await api_client.get(f"/api/v1/tenants/{tenant_id}/profile")
+    assert response.status_code == 401
+
+
 async def test_calls_list_is_empty_then_populated(
     api_client: AsyncClient, api_app: FastAPI
 ) -> None:

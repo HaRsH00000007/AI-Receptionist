@@ -220,10 +220,12 @@ async def test_readyz_reports_the_database(migrated_database: str) -> None:
         response = await client.get("/readyz")
 
     assert response.status_code == 200
-    assert response.json() == {
-        "status": "ready",
-        "checks": {"database": {"ok": True, "detail": None}},
-    }
+    body = response.json()
+    assert body["status"] == "ready"
+    assert body["checks"]["database"] == {"ok": True, "detail": None, "critical": True}
+    # Redis is registered too, but as a non-critical dependency; it is disabled
+    # in the test settings and therefore reports healthy.
+    assert body["degraded"] == []
 
 
 async def test_readyz_reports_a_database_that_is_down() -> None:
