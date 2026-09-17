@@ -105,19 +105,39 @@ export function ConfigurationView() {
             )}
           </Section>
 
-          <Section icon={<MessageIcon size={18} />} title="Greeting" summary={`${style} style`}>
+          <Section
+            icon={<MessageIcon size={18} />}
+            title="Greeting"
+            summary={`${style} style · ${profile?.custom_greeting ? "your wording" : "written for you"}`}
+          >
             <div className="space-y-3">
+              <span className={profile?.custom_greeting ? "badge badge-accent" : "badge badge-neutral"}>
+                {profile?.custom_greeting ? "Your own wording" : "Written for you"}
+              </span>
               <p className="text-sm text-muted">
-                Callers hear this first. It&apos;s written in a {style.toLowerCase()} style from your
-                details.
+                {profile?.custom_greeting
+                  ? `Callers hear this first, exactly as you wrote it, in a ${style.toLowerCase()} voice.`
+                  : `Callers hear this first. It's written in a ${style.toLowerCase()} style from your details.`}
               </p>
               {profile?.greeting ? (
                 <blockquote className="rounded-xl bg-surface-2 px-4 py-3 text-[0.9375rem] leading-relaxed text-ink">
                   “{profile.greeting}”
                 </blockquote>
               ) : (
-                <p className="text-sm text-ink-2">Your greeting is written during setup.</p>
+                <p className="text-sm text-ink-2">
+                  {profile?.custom_greeting
+                    ? `Your line goes live with your receptionist: “${profile.custom_greeting}”`
+                    : "Your greeting is written during setup."}
+                </p>
               )}
+              {/* The two differ while a newly chosen line is waiting to be published. */}
+              {profile?.custom_greeting &&
+                profile.greeting &&
+                profile.custom_greeting !== profile.greeting && (
+                  <p className="text-xs text-muted">
+                    Your latest wording goes live with the next configuration: “{profile.custom_greeting}”
+                  </p>
+                )}
             </div>
           </Section>
 

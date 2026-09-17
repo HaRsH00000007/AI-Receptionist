@@ -122,7 +122,7 @@ class ConfigGenerator:
                 break
 
             return GenerationOutcome(
-                config=config,
+                config=self._with_chosen_greeting(config, profile),
                 source=AgentConfigSource.LLM,
                 detail=reply.model,
                 template_version=AGENT_CONFIG_PROMPT,
@@ -133,11 +133,28 @@ class ConfigGenerator:
             extra={"tenant_id": str(tenant.id), "rejections": len(attempts)},
         )
         return GenerationOutcome(
-            config=self.fallback_config(tenant, profile),
+            config=self._with_chosen_greeting(self.fallback_config(tenant, profile), profile),
             source=AgentConfigSource.TEMPLATE_FALLBACK,
             detail=AGENT_CONFIG_PROMPT,
             template_version=AGENT_CONFIG_PROMPT,
         )
+
+    def _with_chosen_greeting(
+        self, config: GeneratedAgentConfig, profile: BusinessProfile
+    ) -> GeneratedAgentConfig:
+        """Let the owner's own opening line win over the generated one.
+
+        Applied to both paths — the model's config and the template fallback —
+        so "what you previewed is what callers hear" holds however the rest of
+        the configuration was produced. Only the line spoken verbatim is
+        replaced; everything else the model wrote stays, and the voice still
+        comes from the greeting style.
+        """
+        chosen = (profile.greeting_custom or "").strip()
+        if not chosen:
+            return config
+        logger.info("using the owner's own greeting", extra={"greeting_chars": len(chosen)})
+        return config.model_copy(update={"greeting": chosen})
 
     # ---- prompt construction --------------------------------------------
     def _render_input(self, tenant: Tenant, profile: BusinessProfile, template: str) -> str:

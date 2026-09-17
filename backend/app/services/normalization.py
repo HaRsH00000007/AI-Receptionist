@@ -11,6 +11,7 @@ needs one.
 from __future__ import annotations
 
 import re
+import unicodedata
 
 from app.core.errors import InvalidInputError
 from app.data.area_codes import is_known_area_code
@@ -28,6 +29,30 @@ def normalize_email(value: str) -> str:
     the same signup rather than two numbers bought.
     """
     return value.strip().lower()
+
+
+# ---------------------------------------------------------------------------
+# Greeting
+# ---------------------------------------------------------------------------
+_GREETING_WHITESPACE = re.compile(r"\s+")
+
+
+def normalize_greeting(value: str) -> str:
+    """One speakable line, or empty when the owner wants us to write it.
+
+    A greeting is read aloud, so a line break means nothing to a caller, and an
+    invisible control character can confuse a vendor's speech synthesis. Every
+    run of whitespace becomes one space and control characters are dropped —
+    which also stops a greeting smuggling formatting into the vendor payload.
+
+    Whitespace is collapsed *before* control characters are removed, so
+    "Hello\\nthere" stays two words rather than becoming one.
+    """
+    collapsed = _GREETING_WHITESPACE.sub(" ", value)
+    printable = "".join(
+        character for character in collapsed if not unicodedata.category(character).startswith("C")
+    )
+    return printable.strip()
 
 
 # ---------------------------------------------------------------------------

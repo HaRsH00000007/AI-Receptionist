@@ -53,6 +53,10 @@ class BusinessProfileView(BaseModel):
     hours_raw: str | None
     hours: BusinessHours | None
     greeting_style: GreetingStyle
+    #: The opening line the owner chose or wrote, or ``None`` when they asked us
+    #: to write one. Distinct from ``greeting`` below, which is whatever is live
+    #: now — the two differ while a new choice is waiting to be generated.
+    custom_greeting: str | None
     escalation_raw: str | None
     escalation: EscalationPolicy | None
     greeting: str | None

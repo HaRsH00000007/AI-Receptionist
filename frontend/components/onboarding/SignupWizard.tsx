@@ -30,6 +30,8 @@ import {
   HashIcon,
   HeadsetIcon,
   HomeIcon,
+  MessageIcon,
+  MicIcon,
   PhoneForwardIcon,
   ScaleIcon,
   ScissorsIcon,
@@ -37,6 +39,7 @@ import {
 } from "@/components/ui/icons";
 import { ApiError, submitSignup } from "@/lib/api";
 import { formatList, formatNumber } from "@/lib/format";
+import { GREETING_MAX_LENGTH, greetingPreset, type GreetingChoice } from "@/lib/greetings";
 import { PLAN_CATALOG } from "@/lib/plans";
 import {
   GREETING_STYLES,
@@ -62,6 +65,7 @@ const EMPTY: SignupRequest = {
   services: "",
   operating_hours: "",
   greeting_style: "professional",
+  custom_greeting: "",
   escalation_rules: "",
   notification_email: "",
   area_code: "",
@@ -71,7 +75,7 @@ const EMPTY: SignupRequest = {
 
 const STEP_FIELDS: Record<Step, readonly Field[]> = {
   0: ["business_name", "business_type", "services", "contact_phone"],
-  1: ["greeting_style", "operating_hours", "escalation_rules", "notification_email"],
+  1: ["greeting_style", "custom_greeting", "operating_hours", "escalation_rules", "notification_email"],
   2: ["area_code"],
   3: ["plan"],
 };
@@ -83,7 +87,7 @@ const STEP_HEADINGS: Record<Step, { title: string; description: string }> = {
   },
   1: {
     title: "How should your receptionist answer?",
-    description: "Set the tone, your hours, and when to get you involved.",
+    description: "Set the tone, the opening line, your hours, and when to get you involved.",
   },
   2: {
     title: "Choose your phone number",
@@ -160,6 +164,11 @@ export function SignupWizard() {
   const [step, setStep] = useState<Step>(0);
   const [values, setValues] = useState<SignupRequest>(EMPTY);
   const [phoneMode, setPhoneMode] = useState<PhoneMode>("new");
+  // The opening line is three decisions in one: let setup write it, take the
+  // ready-made line for the chosen style, or dictate it word for word. Only the
+  // last two send text, and what is shown is what callers hear.
+  const [greetingChoice, setGreetingChoice] = useState<GreetingChoice>("auto");
+  const [customGreeting, setCustomGreeting] = useState("");
   const [errors, setErrors] = useState<Errors>({});
   const [apiError, setApiError] = useState<ApiError | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -176,6 +185,14 @@ export function SignupWizard() {
     headingRef.current?.focus();
   }, [step]);
 
+  function chosenGreeting(): string {
+    if (greetingChoice === "auto") return "";
+    if (greetingChoice === "preset") {
+      return greetingPreset(values.greeting_style, values.business_name);
+    }
+    return customGreeting.trim();
+  }
+
   function update<K extends Field>(field: K, value: SignupRequest[K]) {
     setValues((previous) => ({ ...previous, [field]: value }));
     setErrors((previous) => (previous[field] ? { ...previous, [field]: undefined } : previous));
@@ -188,6 +205,14 @@ export function SignupWizard() {
   /** Check a step, replacing that step's errors. True when it is clean. */
   function checkStep(index: Step): boolean {
     const found = stepErrors(index, values);
+    if (index === 1 && greetingChoice === "custom") {
+      const line = customGreeting.trim();
+      if (!line) {
+        found.custom_greeting = "Write the line your receptionist should say, or choose another option.";
+      } else if (line.length > GREETING_MAX_LENGTH) {
+        found.custom_greeting = `Keep it under ${GREETING_MAX_LENGTH} characters.`;
+      }
+    }
     setErrors((previous) => {
       const next = { ...previous };
       for (const field of STEP_FIELDS[index]) next[field] = found[field];
@@ -213,6 +238,7 @@ export function SignupWizard() {
         business_name: values.business_name.trim(),
         notification_email: values.notification_email.trim(),
         area_code: values.area_code.trim(),
+        custom_greeting: chosenGreeting(),
       });
       // The grant travels with the redirect; without it the status page
       // cannot read anything.
@@ -245,6 +271,7 @@ export function SignupWizard() {
 
   const heading = STEP_HEADINGS[step];
   const stepProps: StepProps = { values, error, update };
+  const greeting = chosenGreeting();
 
   return (
     <div className="mx-auto max-w-6xl">
@@ -284,10 +311,28 @@ export function SignupWizard() {
               </Alert>
             )}
             {step === 0 && <BusinessStep {...stepProps} />}
-            {step === 1 && <ReceptionistStep {...stepProps} />}
+            {step === 1 && (
+              <ReceptionistStep
+                {...stepProps}
+                greetingChoice={greetingChoice}
+                setGreetingChoice={setGreetingChoice}
+                customGreeting={customGreeting}
+                setCustomGreeting={(text) => {
+                  setCustomGreeting(text);
+                  setErrors((previous) =>
+                    previous.custom_greeting ? { ...previous, custom_greeting: undefined } : previous,
+                  );
+                }}
+              />
+            )}
             {step === 2 && <PhoneStep {...stepProps} phoneMode={phoneMode} setPhoneMode={setPhoneMode} />}
             {step === 3 && (
-              <ReviewStep {...stepProps} phoneMode={phoneMode} goTo={(index) => setStep(index)} />
+              <ReviewStep
+                {...stepProps}
+                phoneMode={phoneMode}
+                greeting={greeting}
+                goTo={(index) => setStep(index)}
+              />
             )}
           </div>
 
@@ -317,7 +362,7 @@ export function SignupWizard() {
         </form>
 
         <aside className="lg:sticky lg:top-24 lg:self-start">
-          <WizardPreview values={values} phoneMode={phoneMode} />
+          <WizardPreview values={values} phoneMode={phoneMode} greeting={greeting} />
         </aside>
       </div>
     </div>
@@ -383,13 +428,28 @@ function BusinessStep({ values, error, update }: StepProps) {
   );
 }
 
-function ReceptionistStep({ values, error, update }: StepProps) {
+function ReceptionistStep({
+  values,
+  error,
+  update,
+  greetingChoice,
+  setGreetingChoice,
+  customGreeting,
+  setCustomGreeting,
+}: StepProps & {
+  greetingChoice: GreetingChoice;
+  setGreetingChoice: (choice: GreetingChoice) => void;
+  customGreeting: string;
+  setCustomGreeting: (text: string) => void;
+}) {
   const name = values.business_name.trim() || "your business";
-  const greetingOptions: ReadonlyArray<ChoiceOption<GreetingStyle>> = GREETING_STYLES.map((style) => ({
+  const styleOptions: ReadonlyArray<ChoiceOption<GreetingStyle>> = GREETING_STYLES.map((style) => ({
     value: style.value,
     label: style.label,
-    description: `“${GREETING_STYLE_COPY[style.value].sample(name)}”`,
+    description: GREETING_STYLE_COPY[style.value].description,
   }));
+  const presetLine = greetingPreset(values.greeting_style, values.business_name);
+  const remaining = GREETING_MAX_LENGTH - customGreeting.trim().length;
 
   return (
     <>
@@ -398,10 +458,56 @@ function ReceptionistStep({ values, error, update }: StepProps) {
         name="greeting_style"
         value={values.greeting_style}
         onChange={(value) => update("greeting_style", value)}
-        options={greetingOptions}
-        columns={1}
+        options={styleOptions}
+        columns={3}
         error={error("greeting_style")}
       />
+
+      <div>
+        <ChoiceGroup
+          legend="Opening line"
+          name="greeting_choice"
+          value={greetingChoice}
+          onChange={setGreetingChoice}
+          columns={1}
+          options={[
+            {
+              value: "auto",
+              label: "Write it for me",
+              description: `We'll write ${name}'s opening line from your details, in the style above.`,
+              icon: <MicIcon size={18} />,
+            },
+            {
+              value: "preset",
+              label: "Use this ready-made line",
+              description: `“${presetLine}”`,
+              icon: <MessageIcon size={18} />,
+            },
+            {
+              value: "custom",
+              label: "Write my own",
+              description: "Say it exactly the way you want it said.",
+              icon: <HeadsetIcon size={18} />,
+            },
+          ]}
+        />
+
+        {greetingChoice === "custom" && (
+          <div className="mt-4">
+            <TextAreaField
+              label="Your opening line"
+              rows={3}
+              value={customGreeting}
+              maxLength={GREETING_MAX_LENGTH}
+              onChange={(event) => setCustomGreeting(event.target.value)}
+              placeholder={presetLine}
+              hint={`Read aloud exactly as written. ${formatNumber(Math.max(0, remaining))} characters left.`}
+              error={error("custom_greeting")}
+            />
+          </div>
+        )}
+      </div>
+
       <div>
         <TextField
           label="Operating hours"
@@ -419,6 +525,7 @@ function ReceptionistStep({ values, error, update }: StepProps) {
           ))}
         </div>
       </div>
+
       <div>
         <TextAreaField
           label="Escalation rules"
@@ -446,6 +553,7 @@ function ReceptionistStep({ values, error, update }: StepProps) {
           ))}
         </div>
       </div>
+
       <TextField
         label="Notification email"
         type="email"
@@ -525,8 +633,9 @@ function ReviewStep({
   error,
   update,
   phoneMode,
+  greeting,
   goTo,
-}: StepProps & { phoneMode: PhoneMode; goTo: (step: Step) => void }) {
+}: StepProps & { phoneMode: PhoneMode; greeting: string; goTo: (step: Step) => void }) {
   const services = splitServices(values.services);
   const style = GREETING_STYLE_COPY[values.greeting_style].label;
   const planOptions: ReadonlyArray<ChoiceOption<Plan>> = PLAN_CATALOG.map((plan) => ({
@@ -553,6 +662,7 @@ function ReviewStep({
           onEdit={() => goTo(1)}
           items={[
             ["Greeting style", style],
+            ["Opening line", greeting ? `“${greeting}”` : "Written for you during setup"],
             ["Operating hours", values.operating_hours],
             ["Escalation rules", values.escalation_rules.trim() || "Take a message for anything it can't handle"],
             ["Notification email", values.notification_email],
@@ -587,7 +697,17 @@ function ReviewStep({
         <ul className="mt-3 space-y-2.5 text-sm text-ink-2">
           <SetupItem>A local phone number in area code {values.area_code}</SetupItem>
           <SetupItem>
-            An AI receptionist with a {style.toLowerCase()} greeting, set up from your services and hours
+            {greeting ? (
+              <>
+                An AI receptionist that opens with{" "}
+                <span className="font-semibold">“{greeting}”</span>, in a {style.toLowerCase()} voice
+              </>
+            ) : (
+              <>
+                An AI receptionist with a {style.toLowerCase()} greeting, set up from your services and
+                hours
+              </>
+            )}
           </SetupItem>
           <SetupItem>Call routing from that number to your receptionist</SetupItem>
           <SetupItem>
@@ -657,9 +777,18 @@ function SetupItem({ children }: { children: ReactNode }) {
   );
 }
 
-function WizardPreview({ values, phoneMode }: { values: SignupRequest; phoneMode: PhoneMode }) {
+function WizardPreview({
+  values,
+  phoneMode,
+  greeting,
+}: {
+  values: SignupRequest;
+  phoneMode: PhoneMode;
+  /** The chosen line, or empty when setup will write one. */
+  greeting: string;
+}) {
   const name = values.business_name.trim();
-  const greeting = GREETING_STYLE_COPY[values.greeting_style].sample(name || "your business");
+  const shown = greeting || GREETING_STYLE_COPY[values.greeting_style].sample(name || "your business");
   const checklist = [
     { label: "Business details", done: Boolean(name && splitServices(values.services).length) },
     { label: "Hours and greeting", done: Boolean(values.operating_hours.trim()) },
@@ -702,9 +831,11 @@ function WizardPreview({ values, phoneMode }: { values: SignupRequest; phoneMode
               ))}
             </span>
           </div>
-          <p className="mt-4 rounded-xl bg-night-3 px-4 py-3 text-sm leading-relaxed">“{greeting}”</p>
+          <p className="mt-4 rounded-xl bg-night-3 px-4 py-3 text-sm leading-relaxed">“{shown}”</p>
           <p className="mt-3 text-xs text-night-muted">
-            Your final greeting is written from your details during setup.
+            {greeting
+              ? "This is exactly what callers will hear."
+              : "Your final greeting is written from your details during setup."}
           </p>
         </div>
       </div>

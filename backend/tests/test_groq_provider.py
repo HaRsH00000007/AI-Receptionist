@@ -271,6 +271,9 @@ class _Profile:
     hours_raw: str | None = "Tue-Sat 9-6"
     hours_json: ClassVar[dict[str, Any] | None] = None
     greeting_style = GreetingStyle.FRIENDLY
+    #: None means "write one for me", so these tests keep asserting on the
+    #: greeting the model produced. Custom greetings have their own file.
+    greeting_custom: str | None = None
     escalation_raw: str | None = None
     escalation_json: ClassVar[dict[str, Any] | None] = None
 

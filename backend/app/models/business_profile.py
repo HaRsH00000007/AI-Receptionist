@@ -52,6 +52,14 @@ class BusinessProfile(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         default=GreetingStyle.PROFESSIONAL,
     )
 
+    #: The opening line the owner chose or wrote, used verbatim.
+    #:
+    #: ``None`` means "write one for me" — the behaviour every tenant had before
+    #: this column existed — and the generated greeting is used instead. The
+    #: style above still picks the voice either way, so a custom line is spoken
+    #: in the register the owner asked for.
+    greeting_custom: Mapped[str | None] = mapped_column(Text, nullable=True)
+
     escalation_raw: Mapped[str | None] = mapped_column(Text, nullable=True)
     escalation_json: Mapped[dict[str, Any] | None] = mapped_column(nullable=True)
 

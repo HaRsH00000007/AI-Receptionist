@@ -97,6 +97,7 @@ async def get_profile(tenant_id: TenantReadDep, session: SessionDep) -> Business
         hours_raw=profile.hours_raw,
         hours=_stored(BusinessHours, profile.hours_json),
         greeting_style=profile.greeting_style,
+        custom_greeting=profile.greeting_custom,
         escalation_raw=profile.escalation_raw,
         escalation=_stored(EscalationPolicy, profile.escalation_json),
         greeting=config.first_message if config else None,

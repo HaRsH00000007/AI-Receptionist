@@ -151,6 +151,9 @@ class SignupService:
             # then asks the LLM. Never a guess.
             hours_json=dump_json_column(hours) if hours else None,
             greeting_style=request.greeting_style,
+            # Empty means the owner asked us to write one; NULL records that
+            # rather than storing a blank line the agent would try to say.
+            greeting_custom=request.custom_greeting or None,
             escalation_raw=request.escalation_rules or None,
             escalation_json=(
                 dump_json_column(EscalationPolicy(notify_email=tenant.contact_email))

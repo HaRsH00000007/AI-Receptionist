@@ -79,7 +79,16 @@ export function ReceptionistView() {
         </Card>
 
         <Card>
-          <CardHeader title="Voice & greeting" />
+          <CardHeader
+            title="Voice & greeting"
+            action={
+              profile && (
+                <Badge tone={profile.custom_greeting ? "accent" : "neutral"}>
+                  {profile.custom_greeting ? "Your own wording" : "Written for you"}
+                </Badge>
+              )
+            }
+          />
           <div className="space-y-4 p-5">
             <div className="flex items-center gap-3">
               <span className="choice-icon">
@@ -93,6 +102,10 @@ export function ReceptionistView() {
             {profile?.greeting ? (
               <blockquote className="rounded-xl bg-surface-2 px-4 py-3 text-[0.9375rem] leading-relaxed text-ink">
                 “{profile.greeting}”
+              </blockquote>
+            ) : profile?.custom_greeting ? (
+              <blockquote className="rounded-xl bg-surface-2 px-4 py-3 text-[0.9375rem] leading-relaxed text-ink">
+                “{profile.custom_greeting}”
               </blockquote>
             ) : (
               <p className="text-sm text-muted">Your greeting is written from your details during setup.</p>

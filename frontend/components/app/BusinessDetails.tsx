@@ -9,6 +9,7 @@
 
 import { cx } from "@/components/ui/cx";
 import { formatClock, formatList, formatPhone, humanize } from "@/lib/format";
+import { greetingPreset } from "@/lib/greetings";
 import {
   WEEKDAYS,
   type BusinessHours,
@@ -24,17 +25,17 @@ export const GREETING_STYLE_COPY: Record<
   professional: {
     label: "Professional",
     description: "Clear, polished and to the point.",
-    sample: (name) => `Thank you for calling ${name}. How can I help you today?`,
+    sample: (name) => greetingPreset("professional", name),
   },
   friendly: {
     label: "Friendly",
     description: "Warm, upbeat and conversational.",
-    sample: (name) => `Hi, thanks for calling ${name}! What can I do for you?`,
+    sample: (name) => greetingPreset("friendly", name),
   },
   formal: {
     label: "Formal",
     description: "Courteous, measured and traditional.",
-    sample: (name) => `Good day, you've reached ${name}. How may I assist you?`,
+    sample: (name) => greetingPreset("formal", name),
   },
 };
 

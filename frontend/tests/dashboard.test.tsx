@@ -127,6 +127,7 @@ function givenHealthyTenant(usage: Record<string, unknown> = {}, calls: CallView
     hours_raw: "Mon-Fri 9-6",
     hours: null,
     greeting_style: "friendly",
+    custom_greeting: null,
     escalation_raw: null,
     escalation: null,
     greeting: "Hi, thanks for calling Sunset Salon!",

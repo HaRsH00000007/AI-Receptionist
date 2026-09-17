@@ -23,6 +23,7 @@ const PAYLOAD: SignupRequest = {
   services: "cuts, colour",
   operating_hours: "Mon-Fri 9-6",
   greeting_style: "friendly",
+  custom_greeting: "",
   escalation_rules: "",
   notification_email: "owner@sunsetsalon.example.com",
   area_code: "805",

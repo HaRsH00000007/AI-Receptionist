@@ -4,8 +4,9 @@
 
 import { describe, expect, it } from "vitest";
 
-import { buildConversationPreview } from "@/components/app/BusinessDetails";
+import { GREETING_STYLE_COPY, buildConversationPreview } from "@/components/app/BusinessDetails";
 import { formatDuration, formatPhone, humanize, initials } from "@/lib/format";
+import { greetingPreset } from "@/lib/greetings";
 import {
   callMatchesStatusFilter,
   friendlyError,
@@ -76,6 +77,32 @@ describe("status", () => {
   });
 });
 
+describe("greetings", () => {
+  it("puts the business's own name in a preset", () => {
+    expect(greetingPreset("friendly", "Sunset Salon")).toBe(
+      "Hi, thanks for calling Sunset Salon! What can I do for you?",
+    );
+    expect(greetingPreset("professional", "  ")).toContain("your business");
+  });
+
+  it("offers one preset per greeting style, and they differ", () => {
+    const lines = (["professional", "friendly", "formal"] as const).map((style) =>
+      greetingPreset(style, "Sunset Salon"),
+    );
+    expect(new Set(lines).size).toBe(3);
+  });
+
+  it("shows the same wording the style sample does", () => {
+    // The wizard previews one and the dashboard shows the other; if they drift,
+    // a customer is shown a line that is not what callers hear.
+    for (const style of ["professional", "friendly", "formal"] as const) {
+      expect(GREETING_STYLE_COPY[style].sample("Sunset Salon")).toBe(
+        greetingPreset(style, "Sunset Salon"),
+      );
+    }
+  });
+});
+
 describe("the configuration preview", () => {
   const PROFILE: BusinessProfileView = {
     services: ["Cuts", "Colour"],
@@ -85,6 +112,7 @@ describe("the configuration preview", () => {
       days: [{ day: "saturday", closed: true, opens_at: null, closes_at: null }],
     },
     greeting_style: "friendly",
+    custom_greeting: null,
     escalation_raw: "Tell me about emergencies",
     escalation: {
       default_mode: "take_message",

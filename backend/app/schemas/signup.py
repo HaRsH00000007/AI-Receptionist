@@ -38,6 +38,14 @@ class SignupRequest(BaseModel):
     )
     operating_hours: str = Field(min_length=1, max_length=1000)
     greeting_style: GreetingStyle = GreetingStyle.PROFESSIONAL
+    #: The exact opening line callers hear, whether picked from the offered
+    #: greetings or typed by the owner. Blank means "write one for me", which is
+    #: what every signup did before this field existed.
+    #:
+    #: The cap matches `GeneratedAgentConfig.greeting`: a longer line would be
+    #: accepted here and then rejected at generation time, which is a confusing
+    #: place to hear about it. A test pins the two together.
+    custom_greeting: str = Field(default="", max_length=300)
     escalation_rules: str = Field(default="", max_length=2000)
     notification_email: EmailStr
     area_code: str = Field(min_length=3, max_length=10)
@@ -50,6 +58,18 @@ class SignupRequest(BaseModel):
         if value is TenantPlan.TRIAL:
             raise ValueError("trial is assigned internally and cannot be requested")
         return value
+
+    @field_validator("custom_greeting")
+    @classmethod
+    def _greeting_is_speakable(cls, value: str) -> str:
+        """Collapse it to the single line the agent will actually say.
+
+        Normalized here rather than at render time so that what is stored, what
+        the owner previewed and what the caller hears are the same string.
+        """
+        from app.services.normalization import normalize_greeting
+
+        return normalize_greeting(value)
 
     @model_validator(mode="after")
     def _services_not_empty(self) -> Self:

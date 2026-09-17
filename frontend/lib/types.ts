@@ -40,6 +40,11 @@ export interface SignupRequest {
   services: string;
   operating_hours: string;
   greeting_style: GreetingStyle;
+  /**
+   * The exact opening line callers hear, chosen from the offered greetings or
+   * written by the owner. Empty means "write one for me" during setup.
+   */
+  custom_greeting: string;
   escalation_rules: string;
   notification_email: string;
   area_code: string;
@@ -252,6 +257,11 @@ export interface BusinessProfileView {
   /** The structured reading, once one exists. */
   hours: BusinessHours | null;
   greeting_style: GreetingStyle;
+  /**
+   * The opening line the owner chose or wrote, or null when they asked us to
+   * write one. Distinct from `greeting`, which is whatever is live right now.
+   */
+  custom_greeting: string | null;
   escalation_raw: string | null;
   escalation: EscalationPolicy | null;
   /** The live opening line callers hear, once a configuration is live. */
