@@ -1,11 +1,17 @@
 """Authentication endpoints.
 
-Four routes, one credential lifecycle:
+Five routes, two ways in, one credential lifecycle:
 
-    POST   /auth/magic-link   ask for a login link
-    POST   /auth/session      trade the link for a session
-    GET    /auth/me           who am I
-    DELETE /auth/session      log out
+    POST   /auth/magic-link       ask for a login link
+    POST   /auth/session          trade the link for a session
+    POST   /auth/password-session sign in with a password
+    GET    /auth/me               who am I
+    DELETE /auth/session          log out
+
+The two sign-in routes are separate endpoints rather than one that branches on
+which field arrived. A single endpoint accepting either would have to decide
+what a request carrying *both* means, and that decision is the kind that gets
+made differently by the next person to touch it.
 
 The magic-link endpoint is the one with a security shape worth stating: it
 answers **identically** whether or not the address has an account. Same status,
@@ -42,10 +48,11 @@ from app.schemas.auth import (
     MagicLinkExchange,
     MagicLinkRequest,
     MagicLinkResponse,
+    PasswordSignIn,
     SessionView,
     TenantMembershipView,
 )
-from app.services.auth import AuthService, Principal
+from app.services.auth import AuthService, IssuedToken, Principal
 
 logger = get_logger(__name__)
 
@@ -105,6 +112,34 @@ def _session_view(
         token=token,
         impersonated=principal.is_impersonating,
     )
+
+
+async def _signed_in(
+    session: SessionDep,
+    response: Response,
+    settings: SettingsDep,
+    issued: IssuedToken,
+) -> SessionView:
+    """Turn a freshly issued session into the response both sign-ins return.
+
+    Shared so that the cookie flags, the body shape and the membership list
+    cannot differ by route — a password session that was subtly weaker than a
+    magic-link one would be a privilege nobody decided to grant.
+    """
+    user = await session.get(User, issued.session.user_id)
+    if user is None:  # pragma: no cover - the sign-in just verified this user
+        raise AuthenticationError("invalid or expired credentials")
+
+    principal = Principal(
+        user=user,
+        session=issued.session,
+        tenant_id=issued.session.active_tenant_id,
+        role=None,
+    )
+    memberships = await _memberships_view(session, principal)
+
+    set_session_cookie(response, settings, issued.token)
+    return _session_view(principal, memberships, token=issued.token)
 
 
 @router.post(
@@ -182,20 +217,40 @@ async def create_session(
         user_agent=request.headers.get("user-agent"),
     )
 
-    user = await session.get(User, issued.session.user_id)
-    if user is None:  # pragma: no cover - the exchange just verified this user
-        raise AuthenticationError("invalid or expired login link")
+    return await _signed_in(session, response, settings, issued)
 
-    principal = Principal(
-        user=user,
-        session=issued.session,
-        tenant_id=issued.session.active_tenant_id,
-        role=None,
+
+@router.post(
+    "/password-session",
+    response_model=SessionView,
+    summary="Sign in with a password",
+)
+async def create_password_session(
+    payload: PasswordSignIn,
+    request: Request,
+    response: Response,
+    session: SessionDep,
+    settings: SettingsDep,
+) -> SessionView:
+    """Exchange an email and password for a session.
+
+    Shares the login rate limiter with the magic-link route, keyed on address
+    and source together. That is deliberate: the two routes are two doors into
+    the same account, and separate budgets would mean an attacker exhausted by
+    one could simply start on the other.
+
+    Every refusal is the same 401 with the same message — see
+    :meth:`AuthService.sign_in_with_password` for why.
+    """
+    await request.app.state.login_rate_limiter.check(_login_limiter_key(request, payload.email))
+
+    issued = await AuthService(session, settings).sign_in_with_password(
+        payload.email,
+        payload.password.get_secret_value(),
+        ip_address=client_ip(request),
+        user_agent=request.headers.get("user-agent"),
     )
-    memberships = await _memberships_view(session, principal)
-
-    set_session_cookie(response, settings, issued.token)
-    return _session_view(principal, memberships, token=issued.token)
+    return await _signed_in(session, response, settings, issued)
 
 
 @router.get(

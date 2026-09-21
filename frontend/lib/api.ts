@@ -14,6 +14,7 @@ import type {
   ApiErrorBody,
   BusinessProfileView,
   CallView,
+  NumberSearchView,
   PhoneNumberView,
   ProvisioningView,
   ReadinessView,
@@ -156,6 +157,20 @@ export function submitSignup(payload: SignupRequest): Promise<SignupResponse> {
   });
 }
 
+/**
+ * Numbers the business can choose from.
+ *
+ * Searching reserves nothing and costs nothing, so the form can call this as
+ * often as someone retypes an area code. When the requested code has no
+ * inventory the answer carries nearby alternatives instead, with
+ * `exact_match: false` — that is the only time alternatives appear.
+ */
+export function searchAvailableNumbers(areaCode: string): Promise<NumberSearchView> {
+  return request<NumberSearchView>(
+    `/api/v1/numbers/available?area_code=${encodeURIComponent(areaCode)}`,
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Tenant-scoped reads
 //
@@ -241,6 +256,21 @@ export function requestMagicLink(email: string): Promise<{ message: string }> {
   return request<{ message: string }>("/api/v1/auth/magic-link", {
     method: "POST",
     body: JSON.stringify({ email }),
+  });
+}
+
+/**
+ * Sign in with a password.
+ *
+ * `withCredentials` matters: the session arrives as an HttpOnly cookie the
+ * browser will only store if the request was allowed to carry credentials.
+ * Without it the call appears to succeed and every later request is a 401.
+ */
+export function signInWithPassword(email: string, password: string): Promise<SessionView> {
+  return request<SessionView>("/api/v1/auth/password-session", {
+    ...withCredentials,
+    method: "POST",
+    body: JSON.stringify({ email, password }),
   });
 }
 

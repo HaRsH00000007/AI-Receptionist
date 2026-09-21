@@ -17,7 +17,7 @@ nobody has to babysit. Assumes Plan A shipped and its state machine exists.
 | Call path | ElevenLabs native Twilio import | **Our TwiML `<Connect><Stream>`** — we own media, records, routing |
 | Cache/queue | none | **Redis** — idempotency, locks, rate limit, hot config, pub/sub |
 | Billing | none | **Stripe** — plans, metered minutes, gate before provisioning |
-| Auth | magic link | Magic link + OAuth, sessions, org/roles, audit log |
+| Auth | magic link | Password + magic link (+ OAuth later), sessions, org/roles, audit log |
 | Deploy | single container | ECS/Fly, ≥2 API replicas, blue/green, IaC |
 | Secrets | env vars | AWS Secrets Manager / Doppler, quarterly rotation |
 | Observability | Sentry + logs | OpenTelemetry traces, metrics, SLO dashboards, on-call alerts |

@@ -50,8 +50,13 @@ from app.providers.models import AvailableNumber
 from app.provisioning.context import StepContext, StepResult
 from app.services.billing_gate import require_entitlement
 from app.services.idempotency import tenant_resource_name
+from app.services.normalization import area_code_of
 
 logger = get_logger(__name__)
+
+#: Recorded on the step when the tenant got the number they picked themselves,
+#: which is what distinguishes it from any rung of the fallback ladder.
+CUSTOMER_CHOICE = "customer_choice"
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,22 +118,60 @@ async def run(ctx: StepContext) -> StepResult:
             response={"adopted": "vendor", "e164": owned.e164, "sid": owned.sid},
         )
 
-    # Deterministic selection.
-    candidate, strategy, tried = await _select_number(ctx)
+    # The number the customer picked at signup, if they picked one. Bought
+    # directly rather than searched for again: they chose it from a list, and a
+    # fresh search could hand them a different number than the one they saw.
+    #
+    # It is a preference, not a reservation — nothing is held at the vendor —
+    # so a number sold to someone else in the meantime falls through to the
+    # ladder below rather than failing the run.
+    requested = (tenant.requested_number or "").strip()
+    tried: list[str] = []
+    pending: PhoneNumber | None = None
+    purchased = None
+    strategy = ""
 
-    # Guard 3: durable intent, committed before any money is spent.
-    record = await _upsert_pending(ctx, e164=candidate.e164)
-    await ctx.session.commit()
+    if requested:
+        tried.append(CUSTOMER_CHOICE)
+        # Guard 3 applies here too: durable intent, committed before the spend.
+        pending = await _upsert_pending(ctx, e164=requested)
+        await ctx.session.commit()
+        await require_entitlement(ctx.session, ctx.settings, tenant.id)
+        try:
+            purchased = await ctx.providers.twilio.purchase_number(
+                e164=requested, friendly_name=friendly_name
+            )
+            strategy = CUSTOMER_CHOICE
+        except VendorError as exc:
+            if not _was_taken(exc):
+                raise
+            logger.info(
+                "the number the customer chose was gone; searching instead",
+                extra={"tenant_id": str(tenant.id), "e164": requested, "code": exc.code},
+            )
 
-    # The last word before the charge. `_select_number` above performs vendor
-    # searches that can take seconds, and that commit ended the transaction the
-    # first check was read in -- so entitlement is confirmed once more, as close
-    # to the spend as it is possible to get.
-    await require_entitlement(ctx.session, ctx.settings, tenant.id)
+    if purchased is None:
+        # Deterministic selection.
+        candidate, strategy, ladder = await _select_number(ctx)
+        tried.extend(ladder)
 
-    purchased = await ctx.providers.twilio.purchase_number(
-        e164=candidate.e164, friendly_name=friendly_name
-    )
+        # Guard 3: durable intent, committed before any money is spent.
+        pending = await _upsert_pending(ctx, e164=candidate.e164)
+        await ctx.session.commit()
+
+        # The last word before the charge. `_select_number` above performs vendor
+        # searches that can take seconds, and that commit ended the transaction the
+        # first check was read in -- so entitlement is confirmed once more, as close
+        # to the spend as it is possible to get.
+        await require_entitlement(ctx.session, ctx.settings, tenant.id)
+
+        purchased = await ctx.providers.twilio.purchase_number(
+            e164=candidate.e164, friendly_name=friendly_name
+        )
+
+    # Both paths above write the pending row before purchasing.
+    assert pending is not None
+    record = pending
 
     _mark_active(record, sid=purchased.sid, e164=purchased.e164)
     await ctx.session.flush()
@@ -145,6 +188,7 @@ async def run(ctx: StepContext) -> StepResult:
     return StepResult(
         request={
             "requested_area_code": tenant.area_code,
+            "requested_number": tenant.requested_number,
             "friendly_name": friendly_name,
             "strategies_tried": tried,
         },
@@ -152,9 +196,22 @@ async def run(ctx: StepContext) -> StepResult:
             "e164": purchased.e164,
             "sid": purchased.sid,
             "strategy": strategy,
+            "chosen_by_customer": strategy == CUSTOMER_CHOICE,
             "phone_number_id": str(record.id),
         },
     )
+
+
+def _was_taken(exc: VendorError) -> bool:
+    """Did the vendor refuse because that number is no longer for sale?
+
+    Twilio answers 400/404 for a number that has been sold or withdrawn since
+    the search, and the in-memory fake raises ``number_unavailable``. Anything
+    else — a bad credential, a rate limit, an outage — is a real failure and
+    must not be swallowed into a silent fallback.
+    """
+    status = getattr(exc, "status_code", None)
+    return exc.code == "number_unavailable" or status in (400, 404, 409)
 
 
 # ---------------------------------------------------------------------------
@@ -209,12 +266,17 @@ async def _upsert_pending(ctx: StepContext, *, e164: str) -> PhoneNumber:
 
     if existing is not None:
         existing.e164 = e164
+        existing.area_code = area_code_of(e164)
         return existing
 
     record = PhoneNumber(
         tenant_id=ctx.tenant.id,
         e164=e164,
-        area_code=ctx.tenant.area_code,
+        # Derived from the number itself rather than from what was asked for.
+        # A customer who picked a nearby number, or a run that fell down the
+        # ladder, must not have the requested area code recorded against a
+        # number that is not in it.
+        area_code=area_code_of(e164),
         status=PhoneNumberStatus.PENDING,
     )
     ctx.session.add(record)
@@ -225,5 +287,6 @@ async def _upsert_pending(ctx: StepContext, *, e164: str) -> PhoneNumber:
 def _mark_active(record: PhoneNumber, *, sid: str, e164: str) -> None:
     record.twilio_sid = sid
     record.e164 = e164
+    record.area_code = area_code_of(e164)
     record.status = PhoneNumberStatus.ACTIVE
     record.purchased_at = datetime.now(UTC)

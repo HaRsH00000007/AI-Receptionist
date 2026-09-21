@@ -6,7 +6,15 @@ import uuid
 from datetime import datetime
 from typing import Any, Self
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    EmailStr,
+    Field,
+    SecretStr,
+    field_validator,
+    model_validator,
+)
 
 from app.models.enums import (
     BusinessType,
@@ -49,8 +57,68 @@ class SignupRequest(BaseModel):
     escalation_rules: str = Field(default="", max_length=2000)
     notification_email: EmailStr
     area_code: str = Field(min_length=3, max_length=10)
+    #: The number the customer picked from the ones offered, in E.164. Blank
+    #: means "choose one for me", which is what every signup did before numbers
+    #: were shown. It may be in a different area code than ``area_code`` above:
+    #: when the requested code has no inventory the form offers nearby ones.
+    selected_number: str = Field(default="", max_length=20)
     plan: SignupPlan = SignupPlan.STARTER
     contact_phone: str = Field(min_length=7, max_length=32)
+    #: The password for the owner's account, chosen on the form.
+    #:
+    #: ``exclude=True`` is load-bearing, not tidiness. The whole request is
+    #: dumped verbatim into ``business_profiles.raw_form_json`` so a config can
+    #: be re-derived later; without this the plain password would be written to
+    #: that column, and from there into every backup and every debug dump of a
+    #: profile. ``SecretStr`` is the second layer: it keeps the value out of
+    #: tracebacks and log lines that repr the model.
+    #:
+    #: Optional because signups do not all come from the web form — the Tally
+    #: webhook has no password field — and because an invited team member never
+    #: chooses one. Blank means the account signs in by magic link, which is how
+    #: every account worked before this field existed. The web form requires it.
+    password: SecretStr = Field(default=SecretStr(""), exclude=True)
+
+    @field_validator("selected_number")
+    @classmethod
+    def _selected_number_is_a_us_number(cls, value: str) -> str:
+        """Checked rather than trusted: it arrives from a browser.
+
+        The purchase step will try to buy exactly this string, so a malformed
+        one should be refused at the form, where the message is useful, rather
+        than by the vendor in the middle of provisioning.
+        """
+        cleaned = value.strip()
+        if not cleaned:
+            return ""
+        if not (cleaned.startswith("+1") and len(cleaned) == 12 and cleaned[1:].isdigit()):
+            raise ValueError("choose one of the numbers offered")
+        return cleaned
+
+    @field_validator("password")
+    @classmethod
+    def _password_is_long_enough(cls, value: SecretStr) -> SecretStr:
+        """Length only. Composition rules are deliberately absent.
+
+        NIST 800-63B dropped the mixed-character requirements because they push
+        people towards `Passw0rd!` — a predictable shape that a cracker tries
+        first — while making the password harder to remember. Length is the
+        property that actually costs an attacker work.
+
+        Not stripped: a leading or trailing space a person typed on purpose is
+        part of their password, and silently trimming it here would lock them
+        out at the login form, which does not trim.
+        """
+        from app.services.passwords import MAX_LENGTH, MIN_LENGTH
+
+        secret = value.get_secret_value()
+        if not secret:
+            return value
+        if len(secret) < MIN_LENGTH:
+            raise ValueError(f"use at least {MIN_LENGTH} characters")
+        if len(secret) > MAX_LENGTH:
+            raise ValueError(f"use at most {MAX_LENGTH} characters")
+        return value
 
     @field_validator("plan")
     @classmethod

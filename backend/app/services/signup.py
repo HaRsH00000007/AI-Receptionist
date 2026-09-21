@@ -1,14 +1,21 @@
 """Signup ingress.
 
-Turns a validated form into a tenant, a business profile, a provisioning run and
-its seven pending steps — in one transaction — and stops there. No provider is
-called: signup returns in milliseconds and the worker does the slow, failure-prone
-part, which is what lets the form stay up when Twilio is down.
+Turns a validated form into a tenant, a business profile, an owner account, a
+provisioning run and its seven pending steps — in one transaction — and stops
+there. No provider is called: signup returns in milliseconds and the worker does
+the slow, failure-prone part, which is what lets the form stay up when Twilio is
+down.
+
+The owner account is created here rather than later, and in the *same*
+transaction, for one reason: a tenant with no account is a business that cannot
+reach its own dashboard. Splitting the two means every partial failure leaves
+exactly that state, and nothing in the system would notice.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import UTC, datetime
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -20,10 +27,12 @@ from app.data.area_codes import timezone_for_area_code
 from app.models import BusinessProfile, ProvisioningRun, ProvisioningStepRecord, Tenant
 from app.models.enums import (
     STEP_SEQUENCE,
+    MembershipRole,
     ProvisioningStatus,
     StepStatus,
     TenantStatus,
 )
+from app.models.identity import Membership, User
 from app.schemas.business import EscalationPolicy, dump_json_column
 from app.schemas.signup import SignupRequest
 from app.services.billing import BillingService
@@ -35,6 +44,7 @@ from app.services.normalization import (
     normalize_services,
     parse_opening_hours,
 )
+from app.services.passwords import hash_password
 
 logger = get_logger(__name__)
 
@@ -49,6 +59,13 @@ class SignupResult:
     run: ProvisioningRun
     #: ``False`` when an existing live signup was returned instead.
     created: bool
+    #: The account that owns this tenant. ``None`` only on the duplicate path,
+    #: where the owner already exists and is not re-read.
+    owner: User | None = None
+    #: Whether this signup left the owner able to sign in with a password. False
+    #: when none was submitted, and false when the address already had an
+    #: account — see :meth:`SignupService._find_or_create_owner`.
+    password_set: bool = False
 
 
 class SignupService:
@@ -89,14 +106,28 @@ class SignupService:
             contact_email=email,
             contact_phone=phone,
             area_code=area_code,
+            # Empty means they did not pick one; NULL records that rather than
+            # storing a blank string the purchase step would have to re-check.
+            requested_number=request.selected_number or None,
             timezone=timezone,
             plan=request.plan,
             status=TenantStatus.PENDING,
         )
         profile = self._build_profile(request, tenant, timezone)
         run = self._build_run(tenant, correlation_id)
+        owner, password_set = await self._find_or_create_owner(request, email)
+        membership = Membership(
+            user_id=owner.id,
+            tenant_id=tenant.id,
+            role=MembershipRole.OWNER,
+            # The founding owner is not invited by anyone and has nothing to
+            # accept: they are already here, filling in the form. An unaccepted
+            # membership grants nothing, so leaving this null would create the
+            # tenant and lock its owner out of it.
+            accepted_at=datetime.now(UTC),
+        )
 
-        self.session.add_all([tenant, profile, run, *self._build_steps(run)])
+        self.session.add_all([tenant, profile, run, *self._build_steps(run), owner, membership])
 
         try:
             await self.session.flush()
@@ -129,9 +160,12 @@ class SignupService:
                 "plan": tenant.plan.value,
                 "area_code": area_code,
                 "timezone": timezone,
+                "password_set": password_set,
             },
         )
-        return SignupResult(tenant=tenant, run=run, created=True)
+        return SignupResult(
+            tenant=tenant, run=run, created=True, owner=owner, password_set=password_set
+        )
 
     # ---- construction ----------------------------------------------------
     def _build_profile(
@@ -161,6 +195,45 @@ class SignupService:
                 else None
             ),
             config_version=1,
+        )
+
+    async def _find_or_create_owner(self, request: SignupRequest, email: str) -> tuple[User, bool]:
+        """The account that will own this tenant, and whether it got a password.
+
+        **An existing account never has its password written here**, and that is
+        the security property this method exists to hold. Signup is anonymous:
+        anyone can submit any email address. If this set a password whenever one
+        was supplied, submitting a stranger's address with a password of your
+        choosing would hand you their account — a takeover requiring no theft,
+        no interception and no access to their inbox. So an address that is
+        already known is reused as-is, and the person keeps whatever credential
+        they already had. Changing a password is a job for a reset flow, which
+        proves control of the inbox first.
+
+        Reusing rather than rejecting is deliberate too: one person legitimately
+        owns more than one business, and the membership table is built for
+        exactly that. A second signup from the same address adds a membership;
+        it does not add a second account for one inbox.
+        """
+        existing = (
+            await self.session.execute(select(User).where(User.email == email).limit(1))
+        ).scalar_one_or_none()
+        if existing is not None:
+            logger.info(
+                "signup reused an existing account for the owner",
+                extra={"user_id": str(existing.id), "email": email},
+            )
+            return existing, False
+
+        password = request.password.get_secret_value()
+        return (
+            User(
+                email=email,
+                # Hashed here, at the edge of the transaction. The plain value
+                # came in on the request and goes no further than this line.
+                password_hash=hash_password(password) if password else None,
+            ),
+            bool(password),
         )
 
     def _build_run(self, tenant: Tenant, correlation_id: str) -> ProvisioningRun:

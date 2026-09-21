@@ -5,7 +5,9 @@
  *
  * It submits the same single `POST /signups` the backend has always accepted —
  * the steps are a presentation of one form, not a multi-request protocol, so
- * nothing is half-created if someone abandons it at step three.
+ * nothing is half-created if someone abandons it at step three. The one
+ * exception is the number search, which only ever *looks*: it reserves nothing
+ * and costs nothing, so it is safe to run whenever an area code changes.
  *
  * Validation here is deliberately thin. The backend is the authority on what a
  * valid phone number or area code is; the wizard only checks enough to stop an
@@ -22,6 +24,7 @@ import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { cx } from "@/components/ui/cx";
 import { ChoiceGroup, TextAreaField, TextField, type ChoiceOption } from "@/components/ui/Field";
+import { Skeleton } from "@/components/ui/Feedback";
 import {
   ArrowLeftIcon,
   ArrowRightIcon,
@@ -35,10 +38,11 @@ import {
   PhoneForwardIcon,
   ScaleIcon,
   ScissorsIcon,
+  SearchIcon,
   StethoscopeIcon,
 } from "@/components/ui/icons";
-import { ApiError, submitSignup } from "@/lib/api";
-import { formatList, formatNumber } from "@/lib/format";
+import { ApiError, searchAvailableNumbers, submitSignup } from "@/lib/api";
+import { formatList, formatNumber, formatPhone } from "@/lib/format";
 import { GREETING_MAX_LENGTH, greetingPreset, type GreetingChoice } from "@/lib/greetings";
 import { PLAN_CATALOG } from "@/lib/plans";
 import {
@@ -46,6 +50,7 @@ import {
   businessTypeLabel,
   type BusinessType,
   type GreetingStyle,
+  type NumberSearchView,
   type Plan,
   type SignupRequest,
 } from "@/lib/types";
@@ -56,6 +61,19 @@ type Field = keyof SignupRequest;
 type Step = 0 | 1 | 2 | 3;
 type PhoneMode = "new" | "forward";
 type Errors = Partial<Record<Field, string>>;
+
+/**
+ * The number search, as the step sees it.
+ *
+ * `idle` matters: it is what lets someone continue without searching at all,
+ * so a vendor outage cannot block signup. Setup then picks a number itself,
+ * exactly as it did before numbers were shown.
+ */
+type NumberSearch =
+  | { status: "idle" }
+  | { status: "searching"; areaCode: string }
+  | { status: "done"; result: NumberSearchView }
+  | { status: "failed"; message: string };
 
 const LAST_STEP: Step = 3;
 
@@ -69,14 +87,26 @@ const EMPTY: SignupRequest = {
   escalation_rules: "",
   notification_email: "",
   area_code: "",
+  selected_number: "",
   plan: "starter",
   contact_phone: "",
+  password: "",
 };
+
+/** Mirrors `MIN_LENGTH` in `app/services/passwords.py`, which rejects shorter. */
+const PASSWORD_MIN_LENGTH = 8;
 
 const STEP_FIELDS: Record<Step, readonly Field[]> = {
   0: ["business_name", "business_type", "services", "contact_phone"],
-  1: ["greeting_style", "custom_greeting", "operating_hours", "escalation_rules", "notification_email"],
-  2: ["area_code"],
+  1: [
+    "greeting_style",
+    "custom_greeting",
+    "operating_hours",
+    "escalation_rules",
+    "notification_email",
+    "password",
+  ],
+  2: ["area_code", "selected_number"],
   3: ["plan"],
 };
 
@@ -91,7 +121,7 @@ const STEP_HEADINGS: Record<Step, { title: string; description: string }> = {
   },
   2: {
     title: "Choose your phone number",
-    description: "Get a new local number, or keep the one your customers already know.",
+    description: "Pick a number in your area code, or keep the one your customers already know.",
   },
   3: {
     title: "Review and activate",
@@ -123,6 +153,11 @@ export function splitServices(value: string): string[] {
     .filter(Boolean);
 }
 
+/** `(646) 555-0123 — New York, NY`, or just the number when the vendor gave no place. */
+function numberPlace(number: { locality: string | null; region: string | null }): string {
+  return [number.locality, number.region].filter(Boolean).join(", ");
+}
+
 function validateField(field: Field, values: SignupRequest): string | undefined {
   switch (field) {
     case "business_name":
@@ -137,6 +172,14 @@ function validateField(field: Field, values: SignupRequest): string | undefined 
       return values.operating_hours.trim() ? undefined : "Tell us when you're open.";
     case "notification_email":
       return EMAIL.test(values.notification_email.trim()) ? undefined : "Enter a valid email address.";
+    case "password":
+      // Length only, matching the backend. Composition rules push people
+      // towards a predictable shape without making anything harder to guess.
+      // Not trimmed: a space someone typed on purpose is part of the password,
+      // and the login form will not trim it either.
+      return values.password.length >= PASSWORD_MIN_LENGTH
+        ? undefined
+        : `Use at least ${PASSWORD_MIN_LENGTH} characters.`;
     case "area_code":
       return /^\d{3}$/.test(values.area_code.trim()) ? undefined : "Enter a 3-digit area code.";
     default:
@@ -169,6 +212,7 @@ export function SignupWizard() {
   // last two send text, and what is shown is what callers hear.
   const [greetingChoice, setGreetingChoice] = useState<GreetingChoice>("auto");
   const [customGreeting, setCustomGreeting] = useState("");
+  const [numberSearch, setNumberSearch] = useState<NumberSearch>({ status: "idle" });
   const [errors, setErrors] = useState<Errors>({});
   const [apiError, setApiError] = useState<ApiError | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -198,6 +242,44 @@ export function SignupWizard() {
     setErrors((previous) => (previous[field] ? { ...previous, [field]: undefined } : previous));
   }
 
+  /** A new area code invalidates the offers: they were for the old one. */
+  function changeAreaCode(areaCode: string) {
+    update("area_code", areaCode);
+    update("selected_number", "");
+    setNumberSearch({ status: "idle" });
+  }
+
+  async function findNumbers() {
+    const problem = validateField("area_code", values);
+    if (problem) {
+      setErrors((previous) => ({ ...previous, area_code: problem }));
+      return;
+    }
+
+    const areaCode = values.area_code.trim();
+    setNumberSearch({ status: "searching", areaCode });
+    update("selected_number", "");
+    try {
+      const result = await searchAvailableNumbers(areaCode);
+      setNumberSearch({ status: "done", result });
+      // Preselected so "Continue" works without a second click; any of them is
+      // as good as another, and the customer can still pick a different one.
+      const first = result.numbers[0];
+      if (first) update("selected_number", first.e164);
+    } catch (caught) {
+      const failure = caught instanceof ApiError ? caught : null;
+      if (failure?.fieldErrors.area_code) {
+        setErrors((previous) => ({ ...previous, area_code: failure.fieldErrors.area_code }));
+        setNumberSearch({ status: "idle" });
+        return;
+      }
+      setNumberSearch({
+        status: "failed",
+        message: failure?.message ?? "We couldn't reach the number service.",
+      });
+    }
+  }
+
   function error(field: Field): string | undefined {
     return errors[field];
   }
@@ -212,6 +294,16 @@ export function SignupWizard() {
       } else if (line.length > GREETING_MAX_LENGTH) {
         found.custom_greeting = `Keep it under ${GREETING_MAX_LENGTH} characters.`;
       }
+    }
+    // Only when numbers are actually on screen. Someone who never searched, or
+    // whose search failed, continues and setup chooses for them.
+    if (
+      index === 2 &&
+      numberSearch.status === "done" &&
+      numberSearch.result.numbers.length > 0 &&
+      !values.selected_number
+    ) {
+      found.selected_number = "Choose one of the numbers below.";
     }
     setErrors((previous) => {
       const next = { ...previous };
@@ -325,7 +417,16 @@ export function SignupWizard() {
                 }}
               />
             )}
-            {step === 2 && <PhoneStep {...stepProps} phoneMode={phoneMode} setPhoneMode={setPhoneMode} />}
+            {step === 2 && (
+              <PhoneStep
+                {...stepProps}
+                phoneMode={phoneMode}
+                setPhoneMode={setPhoneMode}
+                numberSearch={numberSearch}
+                onAreaCodeChange={changeAreaCode}
+                onFindNumbers={() => void findNumbers()}
+              />
+            )}
             {step === 3 && (
               <ReviewStep
                 {...stepProps}
@@ -442,6 +543,9 @@ function ReceptionistStep({
   customGreeting: string;
   setCustomGreeting: (text: string) => void;
 }) {
+  // Local to this step. The password is never lifted into a parent, a URL or
+  // storage — it goes from this field straight into the submitted request.
+  const [revealed, setRevealed] = useState(false);
   const name = values.business_name.trim() || "your business";
   const styleOptions: ReadonlyArray<ChoiceOption<GreetingStyle>> = GREETING_STYLES.map((style) => ({
     value: style.value,
@@ -561,9 +665,35 @@ function ReceptionistStep({
         value={values.notification_email}
         onChange={(event) => update("notification_email", event.target.value)}
         placeholder="owner@yourbusiness.com"
-        hint="Call summaries and urgent alerts are sent here."
+        hint="Call summaries and urgent alerts are sent here. It's also how you sign in."
         error={error("notification_email")}
       />
+
+      <div>
+        <TextField
+          label="Password"
+          type={revealed ? "text" : "password"}
+          // `new-password` rather than `current-password`: it tells a password
+          // manager to offer a generated one instead of autofilling an existing
+          // credential for this address.
+          autoComplete="new-password"
+          value={values.password}
+          onChange={(event) => update("password", event.target.value)}
+          placeholder="At least 8 characters"
+          hint="You'll use this with the email above to sign in to your dashboard."
+          error={error("password")}
+        />
+        {/* A reveal toggle rather than a second "confirm" field. A typo is
+            caught either way, and this one can be checked before submitting
+            instead of only being told the two did not match. */}
+        <button
+          type="button"
+          className="link mt-2 text-xs"
+          onClick={() => setRevealed(!revealed)}
+        >
+          {revealed ? "Hide password" : "Show password"}
+        </button>
+      </div>
     </>
   );
 }
@@ -574,7 +704,16 @@ function PhoneStep({
   update,
   phoneMode,
   setPhoneMode,
-}: StepProps & { phoneMode: PhoneMode; setPhoneMode: (mode: PhoneMode) => void }) {
+  numberSearch,
+  onAreaCodeChange,
+  onFindNumbers,
+}: StepProps & {
+  phoneMode: PhoneMode;
+  setPhoneMode: (mode: PhoneMode) => void;
+  numberSearch: NumberSearch;
+  onAreaCodeChange: (areaCode: string) => void;
+  onFindNumbers: () => void;
+}) {
   return (
     <>
       <ChoiceGroup
@@ -586,7 +725,7 @@ function PhoneStep({
           {
             value: "new",
             label: "Get a new local number",
-            description: "We reserve a number in the area code you choose. Share it anywhere.",
+            description: "Pick one from the numbers available in your area code.",
             icon: <HashIcon size={18} />,
           },
           {
@@ -598,33 +737,137 @@ function PhoneStep({
           },
         ]}
       />
-      <TextField
-        label="Area code"
-        inputMode="numeric"
-        autoComplete="off"
-        maxLength={3}
-        value={values.area_code}
-        onChange={(event) => update("area_code", event.target.value.replace(/\D/g, "").slice(0, 3))}
-        placeholder="805"
-        hint={
-          phoneMode === "new"
-            ? "Your new number will be local to this area code."
-            : "Use your existing number's area code so the AI line is local to it."
-        }
-        error={error("area_code")}
-        className="max-w-xs"
-      />
-      <div className="rounded-xl border border-line bg-surface-2 px-5 py-4">
-        <p className="text-sm font-semibold">
-          {phoneMode === "new" ? "Nothing is bought until your plan is confirmed" : "What happens next"}
-        </p>
-        <p className="mt-1 text-sm leading-relaxed text-muted">
-          {phoneMode === "new"
-            ? "Your plan is checked before a number is reserved, so a setup that doesn't go through never buys one."
-            : "Once your receptionist is live, you'll forward your existing number to the new AI line. The next screen shows you exactly how."}
-        </p>
+
+      <div>
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-start">
+          <TextField
+            label="Area code"
+            inputMode="numeric"
+            autoComplete="off"
+            maxLength={3}
+            value={values.area_code}
+            onChange={(event) => onAreaCodeChange(event.target.value.replace(/\D/g, "").slice(0, 3))}
+            placeholder="805"
+            hint={
+              phoneMode === "new"
+                ? "Your number will be local to this area code."
+                : "Use your existing number's area code so the AI line is local to it."
+            }
+            error={error("area_code")}
+            className="sm:w-40"
+          />
+          <Button
+            variant="secondary"
+            size="lg"
+            className="sm:mt-8"
+            onClick={onFindNumbers}
+            loading={numberSearch.status === "searching"}
+            leadingIcon={<SearchIcon size={16} />}
+          >
+            {numberSearch.status === "done" ? "Search again" : "Find numbers"}
+          </Button>
+        </div>
+
+        <div className="mt-5">
+          <NumberChoices
+            search={numberSearch}
+            selected={values.selected_number}
+            onSelect={(e164) => update("selected_number", e164)}
+            error={error("selected_number")}
+          />
+        </div>
       </div>
+
+      {numberSearch.status === "idle" && (
+        <div className="rounded-xl border border-line bg-surface-2 px-5 py-4">
+          <p className="text-sm font-semibold">
+            {phoneMode === "new" ? "Nothing is bought until your plan is confirmed" : "What happens next"}
+          </p>
+          <p className="mt-1 text-sm leading-relaxed text-muted">
+            {phoneMode === "new"
+              ? "Searching is free and reserves nothing. Your plan is checked before a number is bought, so a setup that doesn't go through never buys one."
+              : "Once your receptionist is live, you'll forward your existing number to the new AI line. The next screen shows you exactly how."}
+          </p>
+        </div>
+      )}
     </>
+  );
+}
+
+/** The numbers on offer, or an honest account of why there are none. */
+function NumberChoices({
+  search,
+  selected,
+  onSelect,
+  error,
+}: {
+  search: NumberSearch;
+  selected: string;
+  onSelect: (e164: string) => void;
+  error?: string;
+}) {
+  if (search.status === "idle") return null;
+
+  if (search.status === "searching") {
+    return (
+      <div aria-busy="true">
+        <p role="status" className="text-sm text-muted">
+          Looking for numbers in {search.areaCode}…
+        </p>
+        <div className="mt-3 grid gap-3 sm:grid-cols-2">
+          {[0, 1, 2, 3].map((key) => (
+            <Skeleton key={key} className="h-16 rounded-xl" />
+          ))}
+        </div>
+      </div>
+    );
+  }
+
+  if (search.status === "failed") {
+    return (
+      <Alert tone="warn" title="We couldn't load available numbers">
+        {search.message} You can continue anyway — we&apos;ll choose a number in your area code
+        during setup.
+      </Alert>
+    );
+  }
+
+  const { result } = search;
+
+  if (result.numbers.length === 0) {
+    return (
+      <Alert tone="warn" title={`No numbers are available in ${result.requested_area_code}`}>
+        There are none nearby either right now. Try another area code, or continue and we&apos;ll keep
+        looking during setup.
+      </Alert>
+    );
+  }
+
+  return (
+    <div className="space-y-3">
+      {!result.exact_match && (
+        <Alert tone="warn" title={`No numbers are available in ${result.requested_area_code}`}>
+          Here are the closest ones we could find.
+        </Alert>
+      )}
+      <ChoiceGroup
+        legend={
+          result.exact_match
+            ? `Available numbers in ${result.requested_area_code}`
+            : "Nearby numbers you can use"
+        }
+        name="selected_number"
+        value={selected}
+        onChange={onSelect}
+        columns={2}
+        error={error}
+        options={result.numbers.map((number) => ({
+          value: number.e164,
+          label: formatPhone(number.e164),
+          description: numberPlace(number) || undefined,
+        }))}
+      />
+    </div>
   );
 }
 
@@ -643,6 +886,9 @@ function ReviewStep({
     label: plan.name,
     description: `${formatNumber(plan.includedMinutes)} minutes included`,
   }));
+  const chosenNumber = values.selected_number
+    ? formatPhone(values.selected_number)
+    : `A number in area code ${values.area_code}, chosen during setup`;
 
   return (
     <>
@@ -666,17 +912,22 @@ function ReviewStep({
             ["Operating hours", values.operating_hours],
             ["Escalation rules", values.escalation_rules.trim() || "Take a message for anything it can't handle"],
             ["Notification email", values.notification_email],
+            // The password itself is never echoed back, not even masked: the
+            // review page is the one most likely to be screenshotted or shown
+            // to someone over a shoulder.
+            ["Dashboard sign-in", `${values.notification_email} and your password`],
           ]}
         />
         <ReviewGroup
           title="Phone"
           onEdit={() => goTo(2)}
           items={[
+            ["Your number", chosenNumber],
             [
-              "Number",
+              "How callers reach it",
               phoneMode === "new"
-                ? `A new local number in area code ${values.area_code}`
-                : `A new AI line in area code ${values.area_code}, with your existing number forwarded to it`,
+                ? "Customers dial this number directly"
+                : "Your existing number forwards to it",
             ],
           ]}
         />
@@ -695,7 +946,16 @@ function ReviewStep({
       <div className="rounded-xl border border-accent-line bg-accent-soft px-5 py-5">
         <p className="text-sm font-semibold text-accent-ink">What we&apos;ll set up</p>
         <ul className="mt-3 space-y-2.5 text-sm text-ink-2">
-          <SetupItem>A local phone number in area code {values.area_code}</SetupItem>
+          <SetupItem>
+            {values.selected_number ? (
+              <>
+                The number <span className="font-semibold">{formatPhone(values.selected_number)}</span>,
+                bought for you
+              </>
+            ) : (
+              <>A local phone number in area code {values.area_code}</>
+            )}
+          </SetupItem>
           <SetupItem>
             {greeting ? (
               <>
@@ -716,7 +976,8 @@ function ReviewStep({
           </SetupItem>
         </ul>
         <p className="mt-4 text-xs leading-relaxed text-accent-ink">
-          Your plan is confirmed before a number is reserved, and you&apos;ll see every step as it happens.
+          Numbers are not held while you decide, so if this one sells first we&apos;ll buy the closest
+          match and show you what you got.
         </p>
       </div>
     </>
@@ -789,6 +1050,11 @@ function WizardPreview({
 }) {
   const name = values.business_name.trim();
   const shown = greeting || GREETING_STYLE_COPY[values.greeting_style].sample(name || "your business");
+  const number = values.selected_number
+    ? formatPhone(values.selected_number)
+    : values.area_code.length === 3
+      ? `+1 (${values.area_code}) ··· ····`
+      : "+1 (···) ··· ····";
   const checklist = [
     { label: "Business details", done: Boolean(name && splitServices(values.services).length) },
     { label: "Hours and greeting", done: Boolean(values.operating_hours.trim()) },
@@ -812,9 +1078,7 @@ function WizardPreview({
           <p className="text-xs text-night-muted">
             {phoneMode === "new" ? "Your new number" : "Forwarded to your AI line"}
           </p>
-          <p className="mt-1 text-lg font-semibold tabular-nums">
-            {values.area_code.length === 3 ? `+1 (${values.area_code}) ··· ····` : "+1 (···) ··· ····"}
-          </p>
+          <p className="mt-1 text-lg font-semibold tabular-nums">{number}</p>
           <div className="mt-5 flex items-center gap-3">
             <span className="flex size-10 shrink-0 items-center justify-center rounded-full bg-[#3651f0] text-white">
               <HeadsetIcon size={18} />

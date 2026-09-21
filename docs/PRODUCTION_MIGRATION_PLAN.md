@@ -273,11 +273,21 @@ exists. Expand/contract migrations only. Centralize tenant scoping in the
 repository layer and add tests that *attempt* cross-tenant reads and must fail.
 
 ### M3 — Auth (COMPLETE)
-Passwordless magic link into session cookies (HttpOnly, Secure, SameSite=lax),
-sessions and links sharing one table because they are one object at two ages.
-Only SHA-256 hashes are stored; links are single-use via `consumed_at`. Roles
+Two ways in, one session cookie (HttpOnly, Secure, SameSite=lax). Sessions and
+magic links share one table because they are one object at two ages; only
+SHA-256 hashes are stored and links are single-use via `consumed_at`. Roles
 owner/admin/member with an explicit rank map — comparing `StrEnum` members
 compares strings, which would make "admin" outrank "owner" alphabetically.
+
+Passwords were added after the magic-link-only design proved unshippable: a
+link cannot be delivered before outbound email is configured, so a business
+that had just signed up held an account it could not open. `users.password_hash`
+is Argon2id and nullable — an account that never chose one still signs in by
+link. Signup creates the owner account and its membership in the same
+transaction as the tenant, and never writes a password onto an address that
+already has an account, which would be a takeover by anyone who knew the email.
+Password reset is not built and needs working email; the magic link is the
+interim recovery path.
 
 Enforcement is a FastAPI dependency (`app/api/auth_deps.py`) rather than a check
 inside handlers, so a new endpoint cannot forget it. A tenant the caller cannot

@@ -50,6 +50,13 @@ class Tenant(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     # Requested on the form; may be absent, in which case the purchase step falls
     # back to the state derived from the contact number.
     area_code: Mapped[str | None] = mapped_column(String(3), nullable=True)
+    #: The exact number the customer picked from the ones offered at signup.
+    #:
+    #: A preference, not a reservation: nothing is held at the vendor between
+    #: the search and the purchase, so the step tries this first and falls back
+    #: to its own search if someone else bought it in the meantime. ``None``
+    #: means they did not choose, which is how every signup worked before.
+    requested_number: Mapped[str | None] = mapped_column(String(20), nullable=True)
     # IANA name, derived from the area code during the validate step. Never
     # guessed at call time: "9-6" means nothing without it.
     timezone: Mapped[str] = mapped_column(String(64), nullable=False, default="America/Los_Angeles")

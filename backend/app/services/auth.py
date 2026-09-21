@@ -1,11 +1,6 @@
 """Authentication: magic links, sessions, and the checks that guard a request.
 
-Passwordless by design. There is no password column anywhere in the schema, so
-there is no credential to steal from a dump, reuse across sites, or leak in a
-log. The tradeoff is an explicit one: account access becomes email access, which
-is already true of any system with a password-reset flow.
-
-The flow:
+Two ways to sign in, one session afterwards.
 
     request_magic_link(email)  -> a short-lived, single-use token, emailed
             |
@@ -13,15 +8,36 @@ The flow:
             |
     authenticate(token)        -> every subsequent request
 
+    sign_in_with_password(email, password)  -> a session is issued directly
+            |
+    authenticate(token)        -> every subsequent request
+
+This was magic-link only at first, and deliberately so: a credential that is
+never stored cannot be stolen from a dump or reused across sites. What changed
+it is that a magic link cannot be delivered before outbound email works, which
+left a business that had just signed up holding an account it could not open.
+The password is what makes the first login possible on day one; the link stays
+as the way back for anyone who has forgotten it, and as the only way in for an
+account that never set one.
+
+Both paths converge on the same :class:`Session` row, because what a session is
+allowed to do must not depend on how it was created. A difference there would
+have to be re-checked at every call site, and one missed check would be a
+privilege the weaker path was never meant to grant.
+
 Both stages are rows in ``sessions``, because a magic link and a session cookie
 are the same object at different ages — a bearer token with an expiry that can
 be revoked — and splitting them would duplicate the expiry, revocation and
 replay logic that must be identical for both.
 
-Enumeration is treated as a real leak throughout. ``request_magic_link`` behaves
-identically for an address with an account and one without: same response, same
-timing class, no distinguishing error. Otherwise the login form becomes a free
-oracle for "is this business a customer of yours?".
+Enumeration is treated as a real leak throughout, and the password path is the
+easier one to get wrong. ``request_magic_link`` behaves identically for an
+address with an account and one without: same response, same timing class, no
+distinguishing error. ``sign_in_with_password`` does the same, including the
+timing — it runs a full Argon2 verification even when there is no account, so
+that "no such user" cannot be told from "wrong password" by a stopwatch.
+Otherwise the login form becomes a free oracle for "is this business a customer
+of yours?".
 """
 
 from __future__ import annotations
@@ -47,6 +63,7 @@ from app.models.enums import (
 )
 from app.models.identity import Membership, Session, User
 from app.services.audit import AuditService
+from app.services.passwords import hash_password, needs_rehash, verify
 from app.services.tokens import generate_token, hash_token
 
 logger = get_logger(__name__)
@@ -107,6 +124,22 @@ class Principal:
                 "insufficient permissions for this action",
                 details={"required_role": required.value},
             )
+
+
+def _refusal_reason(user: User | None, password_correct: bool) -> str:
+    """Why a password sign-in was refused, for the audit log only.
+
+    Never surfaced to the caller. The distinction is what an operator needs to
+    tell a forgotten password from a credential-stuffing run, and exactly what
+    an attacker must not be told.
+    """
+    if user is None:
+        return "no_account"
+    if user.password_hash is None:
+        return "magic_link_only_account"
+    if not password_correct:
+        return "wrong_password"
+    return "inactive_account"
 
 
 class AuthService:
@@ -207,6 +240,91 @@ class AuthService:
         link.status = SessionStatus.REVOKED
         link.revoked_at = now
 
+        if user.email_verified_at is None:
+            # Following a link proves control of the inbox. This is the only
+            # place verification happens, because it is the only place it is
+            # actually demonstrated — choosing a password at signup shows
+            # nothing about who reads the mail for that address.
+            user.email_verified_at = now
+
+        return await self._begin_session(
+            user,
+            now=now,
+            ip_address=ip_address,
+            user_agent=user_agent,
+            method="magic_link",
+        )
+
+    async def sign_in_with_password(
+        self,
+        email: str,
+        password: str,
+        *,
+        ip_address: str | None = None,
+        user_agent: str | None = None,
+    ) -> IssuedToken:
+        """Verify a password and issue a session, or refuse indistinguishably.
+
+        Four different things can be wrong here — no such address, an account
+        that signs in by link and has no password, the wrong password, a
+        suspended account — and all four raise the identical error. Naming which
+        one it was would tell an attacker whether to keep trying this address or
+        move on, which is most of the work in a credential-stuffing run.
+
+        The timing matches too. :func:`app.services.passwords.verify` is called
+        even when there is no account to verify against, so the expensive Argon2
+        computation happens on every path rather than only on the one where a
+        user was found.
+        """
+        now = datetime.now(UTC)
+        normalized = email.strip().lower()
+        user = await self._user_by_email(normalized)
+
+        # Always called, including for `user is None`. See the docstring.
+        correct = verify(password, user.password_hash if user is not None else None)
+
+        if user is None or not correct or user.status is not UserStatus.ACTIVE:
+            self.audit.record(
+                AuditAction.LOGIN_FAILED,
+                actor_type=ActorType.SYSTEM,
+                actor=user,
+                actor_label=normalized,
+                ip_address=ip_address,
+                user_agent=user_agent,
+                # Recorded here but never returned: the operator investigating a
+                # spike of these needs to know which it was, the caller does not.
+                meta={"method": "password", "reason": _refusal_reason(user, correct)},
+            )
+            raise AuthenticationError("invalid email or password")
+
+        if user.password_hash is not None and needs_rehash(user.password_hash):
+            # The only moment the plain password exists alongside a hash made
+            # with outdated parameters. Skipping it would pin every account to
+            # the cost factor it was created with, permanently.
+            user.password_hash = hash_password(password)
+
+        return await self._begin_session(
+            user,
+            now=now,
+            ip_address=ip_address,
+            user_agent=user_agent,
+            method="password",
+        )
+
+    async def _begin_session(
+        self,
+        user: User,
+        *,
+        now: datetime,
+        ip_address: str | None,
+        user_agent: str | None,
+        method: str,
+    ) -> IssuedToken:
+        """Issue the session both sign-in paths end at.
+
+        Shared rather than duplicated so that a session's capabilities cannot
+        drift apart depending on how it was created.
+        """
         issued = self._issue(
             user,
             ttl_s=self.settings.session_ttl_s,
@@ -222,11 +340,6 @@ class AuthService:
             issued.session.active_tenant_id = memberships[0].tenant_id
 
         user.last_login_at = now
-        if user.email_verified_at is None:
-            # Following a link proves control of the inbox. This is the only
-            # place verification happens, because it is the only place it is
-            # actually demonstrated.
-            user.email_verified_at = now
 
         self.audit.record(
             AuditAction.LOGIN_SUCCEEDED,
@@ -235,6 +348,7 @@ class AuthService:
             tenant_id=issued.session.active_tenant_id,
             ip_address=ip_address,
             user_agent=user_agent,
+            meta={"method": method},
         )
         return issued
 

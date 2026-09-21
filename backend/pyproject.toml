@@ -21,6 +21,10 @@ dependencies = [
     # Cache, distributed locks, rate limiting and webhook dedupe. Never the
     # source of truth: every read here has a PostgreSQL fallback.
     "redis>=5.2",
+    # Password hashing. Argon2id is the current password-hashing standard and
+    # the only KDF here: bearer tokens are 256 bits of randomness and are
+    # hashed with SHA-256 instead, for the reasons in `services/tokens.py`.
+    "argon2-cffi>=23.1",
 ]
 
 [dependency-groups]

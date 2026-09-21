@@ -699,14 +699,24 @@ def test_the_cookie_name_matches_the_dependency_alias() -> None:
     assert alias == build_settings().session_cookie_name
 
 
-def test_a_user_model_carries_no_password_column() -> None:
-    """Passwordless is structural, not a convention.
+def test_a_user_model_stores_no_plaintext_password() -> None:
+    """Passwords arrived; plaintext must not have arrived with them.
 
-    There is no credential to steal from a dump, reuse across sites, or leak in
-    a log — and a future change that adds one should have to delete this test.
+    This replaces an earlier test asserting there was no password column at
+    all — a design that was abandoned deliberately, because a magic link cannot
+    be delivered before outbound email works and a new customer was left with
+    an account they could not open. What survives that change is the part that
+    was actually protecting anyone: nothing readable is stored.
+
+    ``password_hash`` is nullable, and that is also structural. An account
+    created before passwords existed, or one invited without choosing a
+    password, signs in by link; a non-null column would have required inventing
+    a credential for every one of them.
     """
-    columns = set(User.__table__.columns.keys())
-    assert not {"password", "password_hash", "hashed_password"} & columns
+    columns = User.__table__.columns
+    assert not {"password", "plaintext_password"} & set(columns.keys())
+    assert "password_hash" in columns
+    assert columns["password_hash"].nullable
 
 
 # ---------------------------------------------------------------------------

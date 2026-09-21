@@ -10,7 +10,7 @@ import { SignupWizard } from "@/components/onboarding/SignupWizard";
 import * as api from "@/lib/api";
 import { ApiError } from "@/lib/api";
 import { greetingPreset } from "@/lib/greetings";
-import type { SignupResponse } from "@/lib/types";
+import type { NumberSearchView, SignupResponse } from "@/lib/types";
 
 const push = vi.fn();
 
@@ -33,6 +33,8 @@ const CREATED: SignupResponse = {
 
 const FRIENDLY_PRESET = greetingPreset("friendly", "Sunset Salon");
 
+const PASSWORD = "a good long password";
+
 function clickContinue() {
   fireEvent.click(screen.getByRole("button", { name: /continue/i }));
 }
@@ -53,6 +55,7 @@ async function fillReceptionist() {
   fireEvent.change(screen.getByLabelText("Notification email"), {
     target: { value: "owner@sunsetsalon.example.com" },
   });
+  fireEvent.change(screen.getByLabelText("Password"), { target: { value: PASSWORD } });
   clickContinue();
   await screen.findByRole("heading", { name: /choose your phone number/i });
 }
@@ -101,8 +104,12 @@ describe("SignupWizard", () => {
       operating_hours: "Mon-Fri 9-6",
       greeting_style: "friendly",
       custom_greeting: "",
+      selected_number: "",
       escalation_rules: "",
       notification_email: "owner@sunsetsalon.example.com",
+      // Sent exactly as typed. The email either side of it is trimmed; the
+      // password is not, because a space someone chose is part of it.
+      password: PASSWORD,
       area_code: "805",
       plan: "starter",
       contact_phone: "8055550142",
@@ -147,7 +154,7 @@ describe("SignupWizard", () => {
 
     render(<SignupWizard />);
     await fillToReview({ forward: true });
-    expect(screen.getByText(/with your existing number forwarded to it/i)).toBeInTheDocument();
+    expect(screen.getByText(/your existing number forwards to it/i)).toBeInTheDocument();
     clickActivate();
 
     await vi.waitFor(() =>
@@ -209,6 +216,57 @@ describe("SignupWizard", () => {
   });
 });
 
+describe("the account password", () => {
+  it("won't move on without one", async () => {
+    render(<SignupWizard />);
+    await fillBusiness();
+    fireEvent.change(screen.getByLabelText("Operating hours"), { target: { value: "Mon-Fri 9-6" } });
+    fireEvent.change(screen.getByLabelText("Notification email"), {
+      target: { value: "owner@sunsetsalon.example.com" },
+    });
+    clickContinue();
+
+    expect(screen.getByText(/at least 8 characters/i)).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: /how should your receptionist answer/i }),
+    ).toBeInTheDocument();
+  });
+
+  it("rejects one that the backend would reject", async () => {
+    // Pinned to `MIN_LENGTH` in `app/services/passwords.py`. A form that
+    // accepted seven characters would fail at the API with a message arriving
+    // three steps later, on the review page.
+    render(<SignupWizard />);
+    await fillBusiness();
+    fireEvent.change(screen.getByLabelText("Password"), { target: { value: "1234567" } });
+    clickContinue();
+
+    expect(screen.getByText(/at least 8 characters/i)).toBeInTheDocument();
+  });
+
+  it("is hidden while typing and can be revealed to check it", async () => {
+    render(<SignupWizard />);
+    await fillBusiness();
+    const field = screen.getByLabelText("Password");
+
+    expect(field).toHaveAttribute("type", "password");
+    fireEvent.click(screen.getByRole("button", { name: /show password/i }));
+    expect(screen.getByLabelText("Password")).toHaveAttribute("type", "text");
+  });
+
+  it("never shows the password back on the review page", async () => {
+    render(<SignupWizard />);
+    await fillBusiness();
+    await fillReceptionist();
+    await fillPhone();
+
+    // Not even masked. This is the page most likely to be screenshotted or
+    // read over a shoulder.
+    expect(screen.queryByText(PASSWORD)).not.toBeInTheDocument();
+    expect(screen.getByText(/and your password/i)).toBeInTheDocument();
+  });
+});
+
 describe("the opening line", () => {
   it("defaults to letting setup write one", async () => {
     const submit = vi.spyOn(api, "submitSignup").mockResolvedValue(CREATED);
@@ -236,6 +294,7 @@ describe("the opening line", () => {
     fireEvent.change(screen.getByLabelText("Notification email"), {
       target: { value: "owner@sunsetsalon.example.com" },
     });
+    fireEvent.change(screen.getByLabelText("Password"), { target: { value: PASSWORD } });
     clickContinue();
     await fillPhone();
     clickActivate();
@@ -257,6 +316,7 @@ describe("the opening line", () => {
     fireEvent.change(screen.getByLabelText("Notification email"), {
       target: { value: "owner@sunsetsalon.example.com" },
     });
+    fireEvent.change(screen.getByLabelText("Password"), { target: { value: PASSWORD } });
     clickContinue();
     await fillPhone();
 
@@ -278,6 +338,7 @@ describe("the opening line", () => {
     fireEvent.change(screen.getByLabelText("Notification email"), {
       target: { value: "owner@sunsetsalon.example.com" },
     });
+    fireEvent.change(screen.getByLabelText("Password"), { target: { value: PASSWORD } });
     clickContinue();
 
     expect(screen.getByText(/write the line your receptionist should say/i)).toBeInTheDocument();
@@ -293,5 +354,139 @@ describe("the opening line", () => {
 
     expect(screen.getAllByText(`“${FRIENDLY_PRESET}”`).length).toBeGreaterThan(0);
     expect(screen.getByText(/exactly what callers will hear/i)).toBeInTheDocument();
+  });
+});
+
+describe("choosing a phone number", () => {
+  const IN_AREA_CODE: NumberSearchView = {
+    requested_area_code: "805",
+    exact_match: true,
+    strategy: "exact_area_code",
+    numbers: [
+      { e164: "+18055550100", area_code: "805", locality: "Santa Barbara", region: "CA" },
+      { e164: "+18055550111", area_code: "805", locality: "Ventura", region: "CA" },
+    ],
+  };
+
+  const NEARBY: NumberSearchView = {
+    requested_area_code: "212",
+    exact_match: false,
+    strategy: "same_state",
+    numbers: [
+      { e164: "+16465550100", area_code: "646", locality: "New York", region: "NY" },
+      { e164: "+17185550100", area_code: "718", locality: "Brooklyn", region: "NY" },
+    ],
+  };
+
+  async function reachPhoneStep() {
+    render(<SignupWizard />);
+    await fillBusiness();
+    fireEvent.click(screen.getByRole("radio", { name: /^friendly/i }));
+    fireEvent.change(screen.getByLabelText("Operating hours"), { target: { value: "Mon-Fri 9-6" } });
+    fireEvent.change(screen.getByLabelText("Notification email"), {
+      target: { value: "owner@sunsetsalon.example.com" },
+    });
+    fireEvent.change(screen.getByLabelText("Password"), { target: { value: PASSWORD } });
+    clickContinue();
+    await screen.findByRole("heading", { name: /choose your phone number/i });
+  }
+
+  function search(areaCode: string) {
+    fireEvent.change(screen.getByLabelText("Area code"), { target: { value: areaCode } });
+    fireEvent.click(screen.getByRole("button", { name: /find numbers/i }));
+  }
+
+  it("offers the numbers available and submits the one picked", async () => {
+    const find = vi.spyOn(api, "searchAvailableNumbers").mockResolvedValue(IN_AREA_CODE);
+    const submit = vi.spyOn(api, "submitSignup").mockResolvedValue(CREATED);
+
+    await reachPhoneStep();
+    search("805");
+
+    // Preselected, so Continue works without a second click.
+    expect(await screen.findByRole("radio", { name: /555-0100/ })).toBeChecked();
+    expect(find).toHaveBeenCalledWith("805");
+
+    fireEvent.click(screen.getByRole("radio", { name: /555-0111/ }));
+    clickContinue();
+    await screen.findByRole("heading", { name: /review and activate/i });
+    clickActivate();
+
+    await vi.waitFor(() =>
+      expect(submit).toHaveBeenCalledWith(
+        expect.objectContaining({ selected_number: "+18055550111", area_code: "805" }),
+      ),
+    );
+  });
+
+  it("shows no alternatives when the requested area code has numbers", async () => {
+    vi.spyOn(api, "searchAvailableNumbers").mockResolvedValue(IN_AREA_CODE);
+
+    await reachPhoneStep();
+    search("805");
+
+    await screen.findByRole("radio", { name: /555-0100/ });
+    expect(screen.queryByText(/no numbers are available/i)).not.toBeInTheDocument();
+  });
+
+  it("says so plainly when the area code is empty, and offers nearby numbers", async () => {
+    vi.spyOn(api, "searchAvailableNumbers").mockResolvedValue(NEARBY);
+
+    await reachPhoneStep();
+    search("212");
+
+    expect(await screen.findByText(/no numbers are available in 212/i)).toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: /\(646\) 555-0100/ })).toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: /\(718\) 555-0100/ })).toBeInTheDocument();
+  });
+
+  it("drops the offers when the area code changes", async () => {
+    // They were numbers in the old area code; keeping them on screen would
+    // invite someone to buy a number nowhere near where they asked.
+    vi.spyOn(api, "searchAvailableNumbers").mockResolvedValue(IN_AREA_CODE);
+
+    await reachPhoneStep();
+    search("805");
+    await screen.findByRole("radio", { name: /555-0100/ });
+
+    fireEvent.change(screen.getByLabelText("Area code"), { target: { value: "213" } });
+
+    expect(screen.queryByRole("radio", { name: /555-0100/ })).not.toBeInTheDocument();
+  });
+
+  it("lets setup choose the number when the search fails", async () => {
+    // A vendor outage must not block signup: the run picks a number itself,
+    // exactly as it did before numbers were shown.
+    vi.spyOn(api, "searchAvailableNumbers").mockRejectedValue(
+      new ApiError("Could not reach the server.", { status: 0, code: "network_error" }),
+    );
+    const submit = vi.spyOn(api, "submitSignup").mockResolvedValue(CREATED);
+
+    await reachPhoneStep();
+    search("805");
+
+    expect(await screen.findByText(/couldn't load available numbers/i)).toBeInTheDocument();
+    clickContinue();
+    await screen.findByRole("heading", { name: /review and activate/i });
+    clickActivate();
+
+    await vi.waitFor(() =>
+      expect(submit).toHaveBeenCalledWith(expect.objectContaining({ selected_number: "" })),
+    );
+  });
+
+  it("reports an area code the backend rejects on the field itself", async () => {
+    vi.spyOn(api, "searchAvailableNumbers").mockRejectedValue(
+      new ApiError("unknown US area code", {
+        status: 422,
+        code: "invalid_input",
+        fieldErrors: { area_code: "unknown US area code" },
+      }),
+    );
+
+    await reachPhoneStep();
+    search("999");
+
+    expect(await screen.findByText("unknown US area code")).toBeInTheDocument();
   });
 });

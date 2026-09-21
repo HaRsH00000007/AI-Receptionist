@@ -34,6 +34,26 @@ export function businessTypeLabel(value: string): string {
   return BUSINESS_TYPES.find((option) => option.value === value)?.label ?? value;
 }
 
+/** One number on offer at the vendor. Not reserved until it is bought. */
+export interface AvailableNumberView {
+  e164: string;
+  area_code: string;
+  locality: string | null;
+  region: string | null;
+}
+
+export interface NumberSearchView {
+  requested_area_code: string;
+  /**
+   * True when the numbers are in the area code that was asked for. When false
+   * they are nearby alternatives, offered only because that code had none.
+   */
+  exact_match: boolean;
+  /** `exact_area_code`, `same_state` or `none`. */
+  strategy: string;
+  numbers: AvailableNumberView[];
+}
+
 export interface SignupRequest {
   business_name: string;
   business_type: BusinessType;
@@ -48,8 +68,20 @@ export interface SignupRequest {
   escalation_rules: string;
   notification_email: string;
   area_code: string;
+  /**
+   * The number picked from the ones offered, in E.164. Empty means "choose one
+   * for me" during setup. It may be in a different area code than `area_code`:
+   * when the requested code has none, nearby numbers are offered instead.
+   */
+  selected_number: string;
   plan: Plan;
   contact_phone: string;
+  /**
+   * The password for the owner's account. The web form always sends one; the
+   * backend treats it as optional because other signup sources (the Tally
+   * webhook) have no such field, and an account without one signs in by link.
+   */
+  password: string;
 }
 
 export interface SignupResponse {

@@ -9,12 +9,15 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
-from app.api.v1 import admin, auth, signups, tenants, voice, webhooks
+from app.api.v1 import admin, auth, numbers, signups, tenants, voice, webhooks
 
 router = APIRouter()
 # Auth first: it is the only unauthenticated group, and reading it first
 # makes the boundary between public and protected routes obvious.
 router.include_router(auth.router)
+# Public like signup, and for the same reason: the form offers numbers to
+# choose from before anyone has an account. It searches and never buys.
+router.include_router(numbers.router)
 router.include_router(signups.router)
 router.include_router(tenants.router)
 router.include_router(webhooks.router)

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import uuid
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, SecretStr
 
 from app.models.enums import MembershipRole
 
@@ -33,6 +33,23 @@ class MagicLinkResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     message: str = "If that address has an account, a sign-in link is on its way."
+
+
+class PasswordSignIn(BaseModel):
+    """Sign in with an email address and a password."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    email: EmailStr
+    #: Bounded, but not otherwise validated. The rules that apply when a
+    #: password is *chosen* have no business here: tightening them later would
+    #: lock out accounts whose existing password no longer passes, and any
+    #: message explaining that would describe a stored credential to whoever
+    #: asked. The only answer this endpoint ever gives is yes or no.
+    #:
+    #: ``SecretStr`` keeps the value out of tracebacks and any log line that
+    #: reprs the request model.
+    password: SecretStr = Field(min_length=1, max_length=256)
 
 
 class MagicLinkExchange(BaseModel):
