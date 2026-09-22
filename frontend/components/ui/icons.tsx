@@ -398,3 +398,20 @@ export const MoonStarIcon = (props: IconProps) => (
     <path d="M17 3v4M15 5h4" />
   </Svg>
 );
+export const PlugIcon = (props: IconProps) => (
+  <Svg {...props}>
+    <path d="M9 2v6M15 2v6M6 8h12v4a6 6 0 0 1-12 0zM12 18v4" />
+  </Svg>
+);
+export const SendIcon = (props: IconProps) => (
+  <Svg {...props}>
+    <path d="m22 2-7 20-4-9-9-4z" />
+    <path d="M22 2 11 13" />
+  </Svg>
+);
+export const PhoneOffIcon = (props: IconProps) => (
+  <Svg {...props}>
+    <path d="M10.7 13.3a16 16 0 0 0 3.4 2.6l1.3-1.3a2 2 0 0 1 2.1-.4c.9.3 1.8.6 2.8.7a2 2 0 0 1 1.7 2v3a2 2 0 0 1-2.2 2 19.8 19.8 0 0 1-8.6-3.1 19.4 19.4 0 0 1-3.3-2.7M5.2 13.2A19.8 19.8 0 0 1 2.1 4.2 2 2 0 0 1 4.1 2h3a2 2 0 0 1 2 1.7c.1 1 .4 1.9.7 2.8a2 2 0 0 1-.5 2.1L8 9.9" />
+    <path d="M22 2 2 22" />
+  </Svg>
+);

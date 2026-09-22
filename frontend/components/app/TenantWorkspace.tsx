@@ -215,6 +215,18 @@ export function useWorkspace(): WorkspaceValue {
 }
 
 /**
+ * Whether the viewer may change this business's settings: owners and admins.
+ *
+ * Only decides which controls to *offer*. The API enforces the same rule on
+ * every write, so a member who forced a hidden button would get a 403.
+ */
+export function useCanManage(): boolean {
+  const { session, tenantId } = useWorkspace();
+  const role = session.memberships.find((entry) => entry.tenant_id === tenantId)?.role;
+  return role === "owner" || role === "admin";
+}
+
+/**
  * For pages rendered inside the shell, which only renders them once data has
  * loaded — so a page never has to handle the "nothing yet" case itself.
  */

@@ -191,6 +191,24 @@ class Settings(BaseSettings):
     resend_api_base_url: str = "https://api.resend.com"
     sendgrid_api_base_url: str = "https://api.sendgrid.com"
 
+    # ---- Integrations ----------------------------------------------------
+    #: Encrypts the OAuth tokens a customer grants us, at rest. A Fernet key
+    #: (`Fernet.generate_key()`); several comma-separated keys rotate, the first
+    #: encrypting and all of them decrypting. Blank means OAuth integrations
+    #: report "configuration required" and cannot be connected — tokens are never
+    #: stored unencrypted as a fallback.
+    integration_encryption_key: SecretStr = SecretStr("")
+    #: Google OAuth client (Google Cloud console, "Web application"). Register
+    #: `<PUBLIC_API_URL>/api/v1/integrations/oauth/google_calendar/callback` as
+    #: its redirect URI; Outlook's is the same with `microsoft_outlook`.
+    google_oauth_client_id: str = ""
+    google_oauth_client_secret: SecretStr = SecretStr("")
+    #: Microsoft identity platform app registration, for Outlook calendars.
+    microsoft_oauth_client_id: str = ""
+    microsoft_oauth_client_secret: SecretStr = SecretStr("")
+    #: `common` accepts work, school and personal Microsoft accounts.
+    microsoft_oauth_tenant: str = "common"
+
     # ---- Admin -----------------------------------------------------------
     #: Shared secret for /admin routes. Not an auth system — just enough that
     #: the retry and abandon actions are not open to the internet.

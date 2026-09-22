@@ -245,7 +245,7 @@ function SidebarUsage({ data, onNavigate }: { data: TenantData; onNavigate?: () 
   const percent = Math.min(100, usage.percent_used);
   return (
     <Link
-      href="/dashboard/usage"
+      href="/dashboard/settings/billing"
       onClick={onNavigate}
       className="m-3 block rounded-xl border border-line p-3.5 transition-colors hover:bg-surface-2"
     >
@@ -347,19 +347,19 @@ function notificationsFor(data: TenantData): MenuItem[] {
     items.push({
       label: "Setup needs attention",
       description: "Setup stopped before your receptionist went live.",
-      href: "/dashboard/receptionist",
+      href: "/dashboard/setup",
     });
   } else if (state === "billing") {
     items.push({
       label: "Setup is waiting on billing",
       description: "It continues automatically once your plan is active.",
-      href: "/dashboard/billing",
+      href: "/dashboard/settings/billing",
     });
   } else if (state === "setting_up") {
     items.push({
       label: "Your receptionist is being set up",
       description: `${data.provisioning.completed_steps} of ${data.provisioning.total_steps} steps done.`,
-      href: "/dashboard/receptionist",
+      href: "/dashboard/setup",
     });
   }
 
@@ -367,13 +367,13 @@ function notificationsFor(data: TenantData): MenuItem[] {
     items.push({
       label: "You've used all included minutes",
       description: "See your usage for this period.",
-      href: "/dashboard/usage",
+      href: "/dashboard/settings/billing",
     });
   } else if (data.usage.warning) {
     items.push({
       label: `You've used ${data.usage.percent_used}% of your minutes`,
       description: "See your usage for this period.",
-      href: "/dashboard/usage",
+      href: "/dashboard/settings/billing",
     });
   }
 

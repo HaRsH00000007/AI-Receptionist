@@ -37,21 +37,25 @@ from app.api.auth_deps import (
     set_session_cookie,
 )
 from app.api.deps import SettingsDep
-from app.core.errors import AuthenticationError
+from app.core.errors import AuthenticationError, AuthorizationError, InvalidInputError
 from app.core.logging import get_logger
 from app.db.session import SessionDep
-from app.models.enums import NotificationKind
+from app.models.enums import ActorType, AuditAction, NotificationKind
 from app.models.identity import Membership, User
 from app.models.operations import Notification
 from app.models.tenant import Tenant
 from app.schemas.auth import (
+    AccountRegistration,
+    AccountUpdate,
     MagicLinkExchange,
     MagicLinkRequest,
     MagicLinkResponse,
+    PasswordChange,
     PasswordSignIn,
     SessionView,
     TenantMembershipView,
 )
+from app.services.audit import AuditService
 from app.services.auth import AuthService, IssuedToken, Principal
 
 logger = get_logger(__name__)
@@ -110,6 +114,7 @@ def _session_view(
         active_tenant_id=principal.session.active_tenant_id,
         memberships=memberships,
         token=token,
+        has_password=principal.user.password_hash is not None,
         impersonated=principal.is_impersonating,
     )
 
@@ -285,3 +290,93 @@ async def delete_session(
     """
     await AuthService(session, settings).logout(principal.session)
     clear_session_cookie(response, settings)
+
+
+@router.patch(
+    "/me",
+    response_model=SessionView,
+    summary="Update your own name",
+)
+async def update_me(
+    payload: AccountUpdate,
+    principal: PrincipalDep,
+    session: SessionDep,
+) -> SessionView:
+    """Only the display name. The email address is the sign-in identity, and
+    moving it needs a verified handover to the new inbox — a separate flow."""
+    if principal.is_impersonating:
+        raise AuthorizationError("account details cannot be changed while impersonating")
+
+    name = " ".join(payload.full_name.split())
+    if not name:
+        raise InvalidInputError("enter your name")
+    if name != principal.user.full_name:
+        principal.user.full_name = name
+        AuditService(session).record(
+            AuditAction.ACCOUNT_UPDATED,
+            actor_type=ActorType.USER,
+            actor=principal.user,
+            meta={"fields": ["full_name"]},
+        )
+    memberships = await _memberships_view(session, principal)
+    return _session_view(principal, memberships)
+
+
+@router.post(
+    "/password",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Set or change your password",
+)
+async def change_password(
+    payload: PasswordChange,
+    principal: PrincipalDep,
+    request: Request,
+    session: SessionDep,
+    settings: SettingsDep,
+) -> None:
+    """Set a password, or change one after confirming the current one.
+
+    Shares the login rate limiter, keyed on the account: guessing the current
+    password here is a sign-in attempt by another name, and must not get its
+    own, separate budget. Every other session is signed out on success.
+    """
+    await request.app.state.login_rate_limiter.check(f"password-change|{principal.user.id}")
+    current = payload.current_password.get_secret_value() if payload.current_password else None
+    await AuthService(session, settings).change_password(
+        principal,
+        current_password=current,
+        new_password=payload.new_password.get_secret_value(),
+        ip_address=client_ip(request),
+        user_agent=request.headers.get("user-agent"),
+    )
+
+
+@router.post(
+    "/register",
+    response_model=SessionView,
+    status_code=status.HTTP_201_CREATED,
+    summary="Create an account and sign in",
+)
+async def register(
+    payload: AccountRegistration,
+    request: Request,
+    response: Response,
+    session: SessionDep,
+    settings: SettingsDep,
+) -> SessionView:
+    """The first step of getting started: an account, before any business.
+
+    Rate-limited on the signup budget, keyed by source. This is the one auth
+    route that says whether an address is registered ("an account with this
+    email already exists"), so it is the one an enumeration run would use; the
+    limit is what keeps that slow.
+    """
+    await request.app.state.signup_rate_limiter.check(client_ip(request) or "unknown")
+    issued = await AuthService(session, settings).register(
+        full_name=payload.full_name,
+        email=str(payload.email),
+        password=payload.password.get_secret_value(),
+        ip_address=client_ip(request),
+        user_agent=request.headers.get("user-agent"),
+    )
+    return await _signed_in(session, response, settings, issued)

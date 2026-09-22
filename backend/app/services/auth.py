@@ -47,11 +47,17 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.core.config import Settings
-from app.core.errors import AuthenticationError, AuthorizationError
+from app.core.errors import (
+    AuthenticationError,
+    AuthorizationError,
+    ConflictError,
+    InvalidInputError,
+)
 from app.core.logging import get_logger
 from app.models.enums import (
     ActorType,
@@ -311,6 +317,89 @@ class AuthService:
             method="password",
         )
 
+    async def register(
+        self,
+        *,
+        full_name: str,
+        email: str,
+        password: str,
+        ip_address: str | None = None,
+        user_agent: str | None = None,
+    ) -> IssuedToken:
+        """Create an account and sign it in — the first step of getting started.
+
+        An address that already has an account is refused with a conflict, and
+        that is a deliberate, stated trade-off: a create-account form has to say
+        "this email already has an account, sign in instead", which confirms the
+        address is registered. The login form still reveals nothing. The route
+        rate-limits this, and the alternative — email-verified registration —
+        needs outbound email working before anyone can start.
+
+        The password is never written to an existing account here: that would be
+        a takeover by form. Changing a password is Settings' job, behind the
+        current one.
+        """
+        normalized = email.strip().lower()
+        name = " ".join(full_name.split())
+        if await self._user_by_email(normalized) is not None:
+            raise ConflictError(
+                "an account with this email already exists; sign in instead",
+                code="account_exists",
+            )
+
+        user = User(email=normalized, full_name=name or None, password_hash=hash_password(password))
+        self.session.add(user)
+        try:
+            await self.session.flush()
+        except IntegrityError as exc:
+            # Two registrations for one address raced; the loser is told what
+            # it would have been told a moment later.
+            await self.session.rollback()
+            raise ConflictError(
+                "an account with this email already exists; sign in instead",
+                code="account_exists",
+            ) from exc
+
+        self.audit.record(
+            AuditAction.ACCOUNT_REGISTERED,
+            actor_type=ActorType.USER,
+            actor=user,
+            ip_address=ip_address,
+            user_agent=user_agent,
+        )
+        return await self._begin_session(
+            user,
+            now=datetime.now(UTC),
+            ip_address=ip_address,
+            user_agent=user_agent,
+            method="register",
+        )
+
+    async def sign_in_new_account(
+        self,
+        user: User,
+        *,
+        ip_address: str | None = None,
+        user_agent: str | None = None,
+    ) -> IssuedToken:
+        """Start a session for an account that signup created moments ago.
+
+        Only for an account created *by this request* with the password the
+        caller just chose — the caller is the person who typed it, so this is
+        exactly a password sign-in without the round trip. It must never be used
+        for an address that already had an account: signup is anonymous, and
+        issuing a session there would hand a stranger's account to whoever
+        typed their email into the form. :class:`SignupResult.password_set` is
+        the flag that encodes the difference, and the signup route checks it.
+        """
+        return await self._begin_session(
+            user,
+            now=datetime.now(UTC),
+            ip_address=ip_address,
+            user_agent=user_agent,
+            method="signup",
+        )
+
     async def _begin_session(
         self,
         user: User,
@@ -439,6 +528,79 @@ class AuthService:
             entity_type="Session",
             entity_id=session_row.id,
         )
+
+    async def change_password(
+        self,
+        principal: Principal,
+        *,
+        current_password: str | None,
+        new_password: str,
+        ip_address: str | None = None,
+        user_agent: str | None = None,
+    ) -> int:
+        """Set or change the signed-in user's password. Returns sessions revoked.
+
+        Three rules:
+
+        * **Support staff cannot do this while impersonating.** An operator who
+          could set a customer's password could keep access after the audited
+          impersonation ended.
+        * **The current password is required when there is one.** A session
+          left open on a shared computer must not be enough to take the account
+          over permanently. An account that has only ever used links has no
+          current password, and the link that signed it in already proved the
+          inbox — the same proof a reset would ask for.
+        * **Every other session is signed out.** Changing a password is what a
+          person does when they suspect someone else has it; leaving that
+          someone signed in would make the change decorative.
+        """
+        user = principal.user
+        if principal.is_impersonating:
+            raise AuthorizationError("a password cannot be changed while impersonating")
+
+        had_password = user.password_hash is not None
+        if had_password and not (current_password and verify(current_password, user.password_hash)):
+            self.audit.record(
+                AuditAction.LOGIN_FAILED,
+                actor_type=ActorType.USER,
+                actor=user,
+                ip_address=ip_address,
+                user_agent=user_agent,
+                meta={"method": "password_change", "reason": "wrong_current_password"},
+            )
+            # 422, not 401: the session is fine, and a 401 would sign the
+            # dashboard out over a typo.
+            raise InvalidInputError(
+                "your current password is incorrect", code="invalid_current_password"
+            )
+
+        user.password_hash = hash_password(new_password)
+
+        now = datetime.now(UTC)
+        others = (
+            await self.session.execute(
+                select(Session).where(
+                    Session.user_id == user.id,
+                    Session.status == SessionStatus.ACTIVE,
+                    Session.id != principal.session.id,
+                )
+            )
+        ).scalars()
+        revoked = 0
+        for row in others:
+            row.status = SessionStatus.REVOKED
+            row.revoked_at = now
+            revoked += 1
+
+        self.audit.record(
+            AuditAction.PASSWORD_CHANGED,
+            actor_type=ActorType.USER,
+            actor=user,
+            ip_address=ip_address,
+            user_agent=user_agent,
+            meta={"had_password": had_password, "sessions_revoked": revoked},
+        )
+        return revoked
 
     async def revoke_all_for_user(self, user_id: uuid.UUID) -> int:
         """Revoke every live session for a user. Returns how many were revoked.

@@ -38,7 +38,8 @@ const SUBSCRIPTION: Record<string, { label: string; tone: Tone }> = {
   expired: { label: "Trial expired", tone: "danger" },
 };
 
-export function BillingView() {
+/** `embedded` drops the page header, for use as a section of Settings. */
+export function BillingView({ embedded = false }: { embedded?: boolean } = {}) {
   const { tenant, provisioning, usage } = useTenantData();
   const billing = provisioning.billing;
   const planId = billing?.plan ?? tenant.plan;
@@ -49,7 +50,9 @@ export function BillingView() {
 
   return (
     <div className="space-y-6 lg:space-y-8">
-      <PageHeader title="Billing" description="Your plan and the state of your subscription." />
+      {!embedded && (
+        <PageHeader title="Billing" description="Your plan and the state of your subscription." />
+      )}
 
       {billing && !billing.entitled && (
         <Alert tone="warn" title="Your subscription needs attention">

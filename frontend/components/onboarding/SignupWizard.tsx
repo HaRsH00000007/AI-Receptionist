@@ -3,11 +3,14 @@
 /**
  * Onboarding: four steps of questions, then activation.
  *
- * It submits the same single `POST /signups` the backend has always accepted —
- * the steps are a presentation of one form, not a multi-request protocol, so
- * nothing is half-created if someone abandons it at step three. The one
- * exception is the number search, which only ever *looks*: it reserves nothing
- * and costs nothing, so it is safe to run whenever an area code changes.
+ * Shown to someone who already has an account and is signed in — the account
+ * comes first (`SignupForm`). It submits one `POST /onboarding`, which creates
+ * the business *for that account*: the steps are a presentation of one form,
+ * not a multi-request protocol, so nothing is half-created if someone abandons
+ * it at step three. What is kept is the form itself: every change is saved to
+ * the account as a draft, so it reopens where it was left, on any device. The
+ * number search only ever *looks*: it reserves nothing and costs nothing, so it
+ * is safe to run whenever an area code changes.
  *
  * Validation here is deliberately thin. The backend is the authority on what a
  * valid phone number or area code is; the wizard only checks enough to stop an
@@ -41,7 +44,7 @@ import {
   SearchIcon,
   StethoscopeIcon,
 } from "@/components/ui/icons";
-import { ApiError, searchAvailableNumbers, submitSignup } from "@/lib/api";
+import { ApiError, saveOnboardingDraft, searchAvailableNumbers, submitOnboarding } from "@/lib/api";
 import { formatList, formatNumber, formatPhone } from "@/lib/format";
 import { GREETING_MAX_LENGTH, greetingPreset, type GreetingChoice } from "@/lib/greetings";
 import { PLAN_CATALOG } from "@/lib/plans";
@@ -52,12 +55,12 @@ import {
   type GreetingStyle,
   type NumberSearchView,
   type Plan,
-  type SignupRequest,
+  type OnboardingRequest,
 } from "@/lib/types";
 
 import { OnboardingStepper } from "./OnboardingStepper";
 
-type Field = keyof SignupRequest;
+type Field = keyof OnboardingRequest;
 type Step = 0 | 1 | 2 | 3;
 type PhoneMode = "new" | "forward";
 type Errors = Partial<Record<Field, string>>;
@@ -77,7 +80,7 @@ type NumberSearch =
 
 const LAST_STEP: Step = 3;
 
-const EMPTY: SignupRequest = {
+const EMPTY: OnboardingRequest = {
   business_name: "",
   business_type: "other",
   services: "",
@@ -90,22 +93,14 @@ const EMPTY: SignupRequest = {
   selected_number: "",
   plan: "starter",
   contact_phone: "",
-  password: "",
 };
 
-/** Mirrors `MIN_LENGTH` in `app/services/passwords.py`, which rejects shorter. */
-const PASSWORD_MIN_LENGTH = 8;
+/** How long the form waits after the last change before saving the draft. */
+const DRAFT_SAVE_DELAY_MS = 800;
 
 const STEP_FIELDS: Record<Step, readonly Field[]> = {
   0: ["business_name", "business_type", "services", "contact_phone"],
-  1: [
-    "greeting_style",
-    "custom_greeting",
-    "operating_hours",
-    "escalation_rules",
-    "notification_email",
-    "password",
-  ],
+  1: ["greeting_style", "custom_greeting", "operating_hours", "escalation_rules", "notification_email"],
   2: ["area_code", "selected_number"],
   3: ["plan"],
 };
@@ -158,7 +153,7 @@ function numberPlace(number: { locality: string | null; region: string | null })
   return [number.locality, number.region].filter(Boolean).join(", ");
 }
 
-function validateField(field: Field, values: SignupRequest): string | undefined {
+function validateField(field: Field, values: OnboardingRequest): string | undefined {
   switch (field) {
     case "business_name":
       return values.business_name.trim() ? undefined : "Enter your business name.";
@@ -172,14 +167,6 @@ function validateField(field: Field, values: SignupRequest): string | undefined 
       return values.operating_hours.trim() ? undefined : "Tell us when you're open.";
     case "notification_email":
       return EMAIL.test(values.notification_email.trim()) ? undefined : "Enter a valid email address.";
-    case "password":
-      // Length only, matching the backend. Composition rules push people
-      // towards a predictable shape without making anything harder to guess.
-      // Not trimmed: a space someone typed on purpose is part of the password,
-      // and the login form will not trim it either.
-      return values.password.length >= PASSWORD_MIN_LENGTH
-        ? undefined
-        : `Use at least ${PASSWORD_MIN_LENGTH} characters.`;
     case "area_code":
       return /^\d{3}$/.test(values.area_code.trim()) ? undefined : "Enter a 3-digit area code.";
     default:
@@ -187,7 +174,7 @@ function validateField(field: Field, values: SignupRequest): string | undefined 
   }
 }
 
-function stepErrors(step: Step, values: SignupRequest): Errors {
+function stepErrors(step: Step, values: OnboardingRequest): Errors {
   const found: Errors = {};
   for (const field of STEP_FIELDS[step]) {
     const message = validateField(field, values);
@@ -197,21 +184,86 @@ function stepErrors(step: Step, values: SignupRequest): Errors {
 }
 
 interface StepProps {
-  values: SignupRequest;
+  values: OnboardingRequest;
   error: (field: Field) => string | undefined;
-  update: <K extends Field>(field: K, value: SignupRequest[K]) => void;
+  update: <K extends Field>(field: K, value: OnboardingRequest[K]) => void;
 }
 
-export function SignupWizard() {
+/** The form as saved to the account between visits. */
+export interface WizardDraft {
+  step: Step;
+  values: OnboardingRequest;
+  phoneMode: PhoneMode;
+  greetingChoice: GreetingChoice;
+  customGreeting: string;
+}
+
+/**
+ * Read a saved draft back, defensively.
+ *
+ * It comes from the server but was written by an earlier version of this form,
+ * so every field is checked rather than trusted: an unknown key is dropped, a
+ * field of the wrong type falls back to its default, and nothing in a draft can
+ * put the form into a state it could not reach by being filled in.
+ */
+export function restoreDraft(data: unknown, accountEmail: string): WizardDraft {
+  const fresh: WizardDraft = {
+    step: 0,
+    values: { ...EMPTY, notification_email: accountEmail },
+    phoneMode: "new",
+    greetingChoice: "auto",
+    customGreeting: "",
+  };
+  if (!data || typeof data !== "object") return fresh;
+  const saved = data as Record<string, unknown>;
+
+  const values = { ...fresh.values };
+  const savedValues = saved["values"];
+  if (savedValues && typeof savedValues === "object") {
+    for (const key of Object.keys(EMPTY) as Field[]) {
+      const value = (savedValues as Record<string, unknown>)[key];
+      if (typeof value === typeof EMPTY[key]) (values as Record<string, unknown>)[key] = value;
+    }
+  }
+  if (!values.notification_email) values.notification_email = accountEmail;
+
+  const step = saved["step"];
+  const phoneMode = saved["phoneMode"];
+  const greetingChoice = saved["greetingChoice"];
+  const customGreeting = saved["customGreeting"];
+  return {
+    step: step === 0 || step === 1 || step === 2 || step === 3 ? step : 0,
+    values,
+    phoneMode: phoneMode === "forward" ? "forward" : "new",
+    greetingChoice:
+      greetingChoice === "preset" || greetingChoice === "custom" ? greetingChoice : "auto",
+    customGreeting: typeof customGreeting === "string" ? customGreeting : "",
+  };
+}
+
+type DraftStatus = "idle" | "saving" | "saved" | "failed";
+
+export function SignupWizard({
+  accountEmail = "",
+  draft = null,
+}: {
+  /** The signed-in account's email; the default for the notification email. */
+  accountEmail?: string;
+  /** A saved, unfinished form to resume, from `restoreDraft`. */
+  draft?: WizardDraft | null;
+} = {}) {
   const router = useRouter();
-  const [step, setStep] = useState<Step>(0);
-  const [values, setValues] = useState<SignupRequest>(EMPTY);
-  const [phoneMode, setPhoneMode] = useState<PhoneMode>("new");
+  const [initial] = useState(() => draft ?? restoreDraft(null, accountEmail));
+  const [step, setStep] = useState<Step>(initial.step);
+  const [values, setValues] = useState<OnboardingRequest>(initial.values);
+  const [phoneMode, setPhoneMode] = useState<PhoneMode>(initial.phoneMode);
   // The opening line is three decisions in one: let setup write it, take the
   // ready-made line for the chosen style, or dictate it word for word. Only the
   // last two send text, and what is shown is what callers hear.
-  const [greetingChoice, setGreetingChoice] = useState<GreetingChoice>("auto");
-  const [customGreeting, setCustomGreeting] = useState("");
+  const [greetingChoice, setGreetingChoice] = useState<GreetingChoice>(initial.greetingChoice);
+  const [customGreeting, setCustomGreeting] = useState(initial.customGreeting);
+  const [draftStatus, setDraftStatus] = useState<DraftStatus>(draft ? "saved" : "idle");
+  const submittedRef = useRef(false);
   const [numberSearch, setNumberSearch] = useState<NumberSearch>({ status: "idle" });
   const [errors, setErrors] = useState<Errors>({});
   const [apiError, setApiError] = useState<ApiError | null>(null);
@@ -229,6 +281,35 @@ export function SignupWizard() {
     headingRef.current?.focus();
   }, [step]);
 
+  // Save the form to the account a moment after each change, so closing the
+  // tab loses nothing. The first render is what was just loaded, so it is not
+  // saved back; after submitting, the server has already discarded the draft.
+  const loaded = useRef(false);
+  useEffect(() => {
+    if (!loaded.current) {
+      loaded.current = true;
+      return;
+    }
+    if (submittedRef.current) return;
+    let cancelled = false;
+    const timer = setTimeout(() => {
+      setDraftStatus("saving");
+      const snapshot: WizardDraft = { step, values, phoneMode, greetingChoice, customGreeting };
+      saveOnboardingDraft(snapshot as unknown as Record<string, unknown>)
+        .then(() => {
+          if (!cancelled) setDraftStatus("saved");
+        })
+        .catch(() => {
+          // Not fatal: the form still submits. The indicator says so.
+          if (!cancelled) setDraftStatus("failed");
+        });
+    }, DRAFT_SAVE_DELAY_MS);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [step, values, phoneMode, greetingChoice, customGreeting]);
+
   function chosenGreeting(): string {
     if (greetingChoice === "auto") return "";
     if (greetingChoice === "preset") {
@@ -237,7 +318,7 @@ export function SignupWizard() {
     return customGreeting.trim();
   }
 
-  function update<K extends Field>(field: K, value: SignupRequest[K]) {
+  function update<K extends Field>(field: K, value: OnboardingRequest[K]) {
     setValues((previous) => ({ ...previous, [field]: value }));
     setErrors((previous) => (previous[field] ? { ...previous, [field]: undefined } : previous));
   }
@@ -325,18 +406,20 @@ export function SignupWizard() {
     setSubmitting(true);
     setApiError(null);
     try {
-      const result = await submitSignup({
+      submittedRef.current = true;
+      await submitOnboarding({
         ...values,
         business_name: values.business_name.trim(),
         notification_email: values.notification_email.trim(),
         area_code: values.area_code.trim(),
         custom_greeting: chosenGreeting(),
       });
-      // The grant travels with the redirect; without it the status page
-      // cannot read anything.
-      const forwarding = phoneMode === "forward" ? "&setup=forward" : "";
-      router.push(`/status/${result.tenant_id}?t=${encodeURIComponent(result.status_token)}${forwarding}`);
+      // The business belongs to the signed-in account, so its owner watches
+      // setup from their account — and lands on the dashboard the moment it
+      // is live.
+      router.push("/dashboard/setup");
     } catch (caught) {
+      submittedRef.current = false;
       const failure =
         caught instanceof ApiError ? caught : new ApiError("Something went wrong. Please try again.", { status: 0 });
       setApiError(failure);
@@ -382,7 +465,18 @@ export function SignupWizard() {
       <div className="mt-8 grid gap-8 lg:grid-cols-[minmax(0,1fr)_21rem] xl:grid-cols-[minmax(0,1fr)_23rem]">
         <form noValidate onSubmit={onSubmit} className="card min-w-0 overflow-hidden shadow-sm">
           <div className="border-b border-line px-5 py-5 sm:px-8 sm:py-6">
-            <p className="text-xs font-semibold text-muted">Step {step + 1} of 5</p>
+            <div className="flex items-center justify-between gap-3">
+              <p className="text-xs font-semibold text-muted">Step {step + 1} of 5</p>
+              <p role="status" className="text-xs text-muted">
+                {draftStatus === "saving"
+                  ? "Saving…"
+                  : draftStatus === "saved"
+                    ? "Progress saved"
+                    : draftStatus === "failed"
+                      ? "Couldn't save progress"
+                      : ""}
+              </p>
+            </div>
             <h2 ref={headingRef} tabIndex={-1} className="mt-1 text-xl font-bold tracking-tight outline-none">
               {heading.title}
             </h2>
@@ -543,9 +637,6 @@ function ReceptionistStep({
   customGreeting: string;
   setCustomGreeting: (text: string) => void;
 }) {
-  // Local to this step. The password is never lifted into a parent, a URL or
-  // storage — it goes from this field straight into the submitted request.
-  const [revealed, setRevealed] = useState(false);
   const name = values.business_name.trim() || "your business";
   const styleOptions: ReadonlyArray<ChoiceOption<GreetingStyle>> = GREETING_STYLES.map((style) => ({
     value: style.value,
@@ -665,35 +756,9 @@ function ReceptionistStep({
         value={values.notification_email}
         onChange={(event) => update("notification_email", event.target.value)}
         placeholder="owner@yourbusiness.com"
-        hint="Call summaries and urgent alerts are sent here. It's also how you sign in."
+        hint="Call summaries and urgent alerts are sent here. It can differ from the email you sign in with."
         error={error("notification_email")}
       />
-
-      <div>
-        <TextField
-          label="Password"
-          type={revealed ? "text" : "password"}
-          // `new-password` rather than `current-password`: it tells a password
-          // manager to offer a generated one instead of autofilling an existing
-          // credential for this address.
-          autoComplete="new-password"
-          value={values.password}
-          onChange={(event) => update("password", event.target.value)}
-          placeholder="At least 8 characters"
-          hint="You'll use this with the email above to sign in to your dashboard."
-          error={error("password")}
-        />
-        {/* A reveal toggle rather than a second "confirm" field. A typo is
-            caught either way, and this one can be checked before submitting
-            instead of only being told the two did not match. */}
-        <button
-          type="button"
-          className="link mt-2 text-xs"
-          onClick={() => setRevealed(!revealed)}
-        >
-          {revealed ? "Hide password" : "Show password"}
-        </button>
-      </div>
     </>
   );
 }
@@ -912,10 +977,6 @@ function ReviewStep({
             ["Operating hours", values.operating_hours],
             ["Escalation rules", values.escalation_rules.trim() || "Take a message for anything it can't handle"],
             ["Notification email", values.notification_email],
-            // The password itself is never echoed back, not even masked: the
-            // review page is the one most likely to be screenshotted or shown
-            // to someone over a shoulder.
-            ["Dashboard sign-in", `${values.notification_email} and your password`],
           ]}
         />
         <ReviewGroup
@@ -1043,7 +1104,7 @@ function WizardPreview({
   phoneMode,
   greeting,
 }: {
-  values: SignupRequest;
+  values: OnboardingRequest;
   phoneMode: PhoneMode;
   /** The chosen line, or empty when setup will write one. */
   greeting: string;

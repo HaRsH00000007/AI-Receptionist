@@ -60,6 +60,10 @@ EXPECTED_TABLES = {
     "notification_attempts",
     "recordings",
     "data_deletion_requests",
+    # ---- customer portal ----
+    "tenant_integrations",
+    "sms_registrations",
+    "onboarding_drafts",
 }
 
 

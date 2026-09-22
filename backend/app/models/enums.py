@@ -470,6 +470,18 @@ class AuditAction(StrEnum):
     DATA_DELETION_REQUESTED = "data_deletion_requested"
     DATA_DELETION_COMPLETED = "data_deletion_completed"
 
+    # ---- customer portal ----
+    PROFILE_UPDATED = "profile_updated"
+    ACCOUNT_UPDATED = "account_updated"
+    PASSWORD_CHANGED = "password_changed"
+    ACCOUNT_REGISTERED = "account_registered"
+    BUSINESS_CREATED = "business_created"
+    INTEGRATION_CONNECTED = "integration_connected"
+    INTEGRATION_DISCONNECTED = "integration_disconnected"
+    SMS_REGISTRATION_SAVED = "sms_registration_saved"
+    SMS_REGISTRATION_SUBMITTED = "sms_registration_submitted"
+    SMS_REGISTRATION_REVIEWED = "sms_registration_reviewed"
+
 
 # ---------------------------------------------------------------------------
 # Notifications
@@ -506,3 +518,80 @@ class DeletionRequestStatus(StrEnum):
     IN_PROGRESS = "in_progress"
     COMPLETED = "completed"
     REJECTED = "rejected"
+
+
+# ---------------------------------------------------------------------------
+# Integrations
+# ---------------------------------------------------------------------------
+
+
+class IntegrationProvider(StrEnum):
+    """Every third-party service a tenant can connect.
+
+    A member here is an *identity*, not a promise that the integration works:
+    whether a provider can actually be connected is decided by the catalog
+    (``app.integrations.catalog``), from the implementation and the operator's
+    configuration.
+    """
+
+    GOOGLE_CALENDAR = "google_calendar"
+    MICROSOFT_OUTLOOK = "microsoft_outlook"
+    ZAPIER = "zapier"
+    CLIO = "clio"
+    ACUITY_SCHEDULING = "acuity_scheduling"
+
+
+class IntegrationStatus(StrEnum):
+    #: Credentials are stored and were valid when last used.
+    CONNECTED = "connected"
+    #: Credentials are stored but a refresh or call was refused — typically the
+    #: customer revoked access at the provider. Reconnecting fixes it.
+    ERROR = "error"
+    #: Was connected; credentials have been deleted. Kept for the audit trail.
+    DISCONNECTED = "disconnected"
+
+
+# ---------------------------------------------------------------------------
+# SMS compliance
+# ---------------------------------------------------------------------------
+
+
+class SmsRegistrationStatus(StrEnum):
+    """Where a tenant's A2P 10DLC registration stands.
+
+    US carriers refuse application-to-person texts from a 10-digit number that
+    is not registered to a vetted brand and campaign. Only the *customer*
+    moves a registration from draft to submitted; everything after that is
+    decided by review — ours and then the carriers' via Twilio — and is never
+    something the customer can set.
+
+    "Not configured" and "compliance required" are not stored states: they are
+    read off the tenant (no number yet / number but no registration row).
+    """
+
+    DRAFT = "draft"
+    SUBMITTED = "submitted"
+    UNDER_REVIEW = "under_review"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+    #: Approved *and* the number is attached to the registered messaging
+    #: service. The only state in which a campaign may be sent.
+    ENABLED = "enabled"
+
+
+class SmsBrandType(StrEnum):
+    #: A registered business with a tax id (EIN). Higher throughput.
+    STANDARD = "standard"
+    #: No EIN. Carriers cap volume and allow one number.
+    SOLE_PROPRIETOR = "sole_proprietor"
+
+
+class SmsUseCase(StrEnum):
+    """The campaign use case, as carriers classify it. A subset of TCR's list —
+    the ones a receptionist business plausibly needs."""
+
+    CUSTOMER_CARE = "customer_care"
+    ACCOUNT_NOTIFICATION = "account_notification"
+    APPOINTMENT_REMINDERS = "appointment_reminders"
+    MARKETING = "marketing"
+    MIXED = "mixed"

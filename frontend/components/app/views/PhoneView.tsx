@@ -15,16 +15,19 @@ import { PageHeader } from "@/components/ui/PageHeader";
 import { formatDate, formatPhone, humanize } from "@/lib/format";
 import { receptionistState } from "@/lib/status";
 
-export function PhoneView() {
+/** `embedded` drops the page header, for use as a section of Settings. */
+export function PhoneView({ embedded = false }: { embedded?: boolean } = {}) {
   const { tenant, provisioning, phone } = useTenantData();
   const state = receptionistState(tenant.status, provisioning.status);
 
   return (
     <div className="space-y-6 lg:space-y-8">
-      <PageHeader
-        title="Phone Numbers"
-        description="The number your receptionist answers, and how to send your existing line to it."
-      />
+      {!embedded && (
+        <PageHeader
+          title="Phone Numbers"
+          description="The number your receptionist answers, and how to send your existing line to it."
+        />
+      )}
 
       {phone ? (
         <Card className="overflow-hidden">
@@ -65,7 +68,7 @@ export function PhoneView() {
               : `A local number${tenant.area_code ? ` in area code ${tenant.area_code}` : ""} is assigned during setup.`
           }
           action={
-            <ButtonLink href="/dashboard/receptionist#setup" variant="secondary">
+            <ButtonLink href="/dashboard/setup" variant="secondary">
               View setup progress
             </ButtonLink>
           }

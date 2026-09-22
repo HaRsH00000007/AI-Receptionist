@@ -10,18 +10,32 @@ import type {
   ActionResult,
   AgentConfigDetailView,
   AgentConfigView,
+  AgentSettingsUpdate,
+  AgentUpdateResult,
   AgentView,
   ApiErrorBody,
   BusinessProfileView,
+  CallDetailView,
   CallView,
+  ConfigVersionView,
+  ContactView,
+  DashboardSummaryView,
+  IntegrationCheckView,
+  IntegrationListView,
+  IntegrationView,
   NumberSearchView,
+  OnboardingDraftView,
+  OnboardingRequest,
   PhoneNumberView,
   ProvisioningView,
   ReadinessView,
+  RetryResult,
   RunSummaryView,
   SessionView,
   SignupRequest,
   SignupResponse,
+  SmsRegistrationInput,
+  SmsStateView,
   TenantView,
   UsageView,
 } from "./types";
@@ -36,6 +50,8 @@ export class ApiError extends Error {
   readonly code: string;
   readonly correlationId: string | null;
   readonly fieldErrors: Record<string, string>;
+  /** The error envelope's structured `details`, when the server sent any. */
+  readonly details: Record<string, unknown>;
 
   constructor(
     message: string,
@@ -44,6 +60,7 @@ export class ApiError extends Error {
       code?: string;
       correlationId?: string | null;
       fieldErrors?: Record<string, string>;
+      details?: Record<string, unknown>;
     },
   ) {
     super(message);
@@ -52,6 +69,7 @@ export class ApiError extends Error {
     this.code = options.code ?? "unknown";
     this.correlationId = options.correlationId ?? null;
     this.fieldErrors = options.fieldErrors ?? {};
+    this.details = options.details ?? {};
   }
 }
 
@@ -120,6 +138,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
         code: body.error.code,
         correlationId: body.correlation_id,
         fieldErrors: fieldErrorsFrom(body),
+        details: body.error.details,
       });
     }
     throw new ApiError(`Request failed (${response.status})`, {
@@ -151,7 +170,11 @@ async function orNull<T>(pending: Promise<T>): Promise<T | null> {
 }
 
 export function submitSignup(payload: SignupRequest): Promise<SignupResponse> {
+  // Credentials, because a new account is signed in by this response: the
+  // session arrives as an HttpOnly cookie, which a cross-origin browser only
+  // stores when the request was allowed to carry credentials.
   return request<SignupResponse>("/api/v1/signups", {
+    ...withCredentials,
     method: "POST",
     body: JSON.stringify(payload),
   });
@@ -217,9 +240,14 @@ export function getPhoneOrNull(
 export function listCalls(
   tenantId: string,
   statusToken?: string,
-  options: { limit?: number } = {},
+  options: { limit?: number; caller?: string } = {},
 ): Promise<CallView[]> {
-  const query = options.limit ? `?limit=${options.limit}` : "";
+  const params = new URLSearchParams();
+  if (options.limit) params.set("limit", String(options.limit));
+  // One caller's history, for a contact. The server filters, so the result is
+  // their calls rather than whichever of them fell inside the latest 100.
+  if (options.caller) params.set("caller", options.caller);
+  const query = params.size ? `?${params.toString()}` : "";
   return tenantRead<CallView[]>(`/api/v1/tenants/${tenantId}/calls${query}`, statusToken);
 }
 
@@ -246,6 +274,99 @@ export function getAgent(tenantId: string): Promise<AgentView> {
 /** A 404 is expected before the agent is created. */
 export function getAgentOrNull(tenantId: string): Promise<AgentView | null> {
   return orNull(getAgent(tenantId));
+}
+
+// ---------------------------------------------------------------------------
+// The signed-in portal
+//
+// Membership-only on the server: none of these accept the status grant, so
+// none take a `statusToken`. Writes need an owner or admin; the API answers a
+// plain member with 403, which the pages avoid by not offering the control.
+// ---------------------------------------------------------------------------
+
+function portal<T>(path: string, init?: RequestInit): Promise<T> {
+  return request<T>(`/api/v1/tenants/${path}`, { ...withCredentials, ...init });
+}
+
+function send<T>(path: string, method: "POST" | "PUT" | "PATCH", body?: unknown): Promise<T> {
+  return portal<T>(path, {
+    method,
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+}
+
+export function getDashboardSummary(tenantId: string, days = 30): Promise<DashboardSummaryView> {
+  return portal<DashboardSummaryView>(`${tenantId}/dashboard?days=${days}`);
+}
+
+export function getCallDetail(tenantId: string, callId: string): Promise<CallDetailView> {
+  return portal<CallDetailView>(`${tenantId}/calls/${callId}`);
+}
+
+export function listContacts(tenantId: string): Promise<ContactView[]> {
+  return portal<ContactView[]>(`${tenantId}/contacts`);
+}
+
+export function listConfigVersions(tenantId: string): Promise<ConfigVersionView[]> {
+  return portal<ConfigVersionView[]>(`${tenantId}/agent/versions`);
+}
+
+export function updateAgentSettings(
+  tenantId: string,
+  settings: AgentSettingsUpdate,
+): Promise<AgentUpdateResult> {
+  return send<AgentUpdateResult>(`${tenantId}/agent/settings`, "PUT", settings);
+}
+
+export function retryProvisioning(tenantId: string): Promise<RetryResult> {
+  return send<RetryResult>(`${tenantId}/provisioning/retry`, "POST");
+}
+
+export function listIntegrations(tenantId: string): Promise<IntegrationListView> {
+  return portal<IntegrationListView>(`${tenantId}/integrations`);
+}
+
+/** Returns the provider's consent URL. Nothing is connected until it returns. */
+export function connectIntegration(
+  tenantId: string,
+  provider: string,
+): Promise<{ authorization_url: string }> {
+  return send<{ authorization_url: string }>(
+    `${tenantId}/integrations/${encodeURIComponent(provider)}/connect`,
+    "POST",
+  );
+}
+
+export function disconnectIntegration(tenantId: string, provider: string): Promise<IntegrationView> {
+  return send<IntegrationView>(
+    `${tenantId}/integrations/${encodeURIComponent(provider)}/disconnect`,
+    "POST",
+  );
+}
+
+export function verifyIntegration(
+  tenantId: string,
+  provider: string,
+): Promise<IntegrationCheckView> {
+  return send<IntegrationCheckView>(
+    `${tenantId}/integrations/${encodeURIComponent(provider)}/verify`,
+    "POST",
+  );
+}
+
+export function getSmsState(tenantId: string): Promise<SmsStateView> {
+  return portal<SmsStateView>(`${tenantId}/sms`);
+}
+
+export function saveSmsRegistration(
+  tenantId: string,
+  registration: SmsRegistrationInput,
+): Promise<SmsStateView> {
+  return send<SmsStateView>(`${tenantId}/sms/registration`, "PUT", registration);
+}
+
+export function submitSmsRegistration(tenantId: string): Promise<SmsStateView> {
+  return send<SmsStateView>(`${tenantId}/sms/registration/submit`, "POST");
 }
 
 // ---------------------------------------------------------------------------
@@ -296,6 +417,66 @@ export async function getSessionOrNull(): Promise<SessionView | null> {
     }
     throw error;
   }
+}
+
+/**
+ * Create an account and sign in — the first step of getting started. The
+ * session arrives as an HttpOnly cookie, hence credentials.
+ */
+export function registerAccount(
+  fullName: string,
+  email: string,
+  password: string,
+): Promise<SessionView> {
+  return request<SessionView>("/api/v1/auth/register", {
+    ...withCredentials,
+    method: "POST",
+    body: JSON.stringify({ full_name: fullName, email, password }),
+  });
+}
+
+/** Create the business for the signed-in account. Its owner is the session. */
+export function submitOnboarding(payload: OnboardingRequest): Promise<SignupResponse> {
+  return request<SignupResponse>("/api/v1/onboarding", {
+    ...withCredentials,
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function getOnboardingDraft(): Promise<OnboardingDraftView> {
+  return request<OnboardingDraftView>("/api/v1/onboarding/draft", withCredentials);
+}
+
+export function saveOnboardingDraft(data: Record<string, unknown>): Promise<OnboardingDraftView> {
+  return request<OnboardingDraftView>("/api/v1/onboarding/draft", {
+    ...withCredentials,
+    method: "PUT",
+    body: JSON.stringify({ data }),
+  });
+}
+
+export function updateAccount(fullName: string): Promise<SessionView> {
+  return request<SessionView>("/api/v1/auth/me", {
+    ...withCredentials,
+    method: "PATCH",
+    body: JSON.stringify({ full_name: fullName }),
+  });
+}
+
+/**
+ * Set or change the password. `currentPassword` is required when the account
+ * already has one; every other session is signed out on success.
+ */
+export function changePassword(currentPassword: string | null, newPassword: string): Promise<void> {
+  return request<void>("/api/v1/auth/password", {
+    ...withCredentials,
+    method: "POST",
+    body: JSON.stringify({
+      ...(currentPassword ? { current_password: currentPassword } : {}),
+      new_password: newPassword,
+    }),
+  });
 }
 
 export async function logout(): Promise<void> {

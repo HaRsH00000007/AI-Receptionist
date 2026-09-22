@@ -91,6 +91,47 @@ class SessionView(BaseModel):
     memberships: list[TenantMembershipView] = Field(default_factory=list)
     #: Present on exchange only. Never persisted anywhere in plain form.
     token: str | None = None
+    #: Whether the account can sign in with a password, so Settings can offer
+    #: "set a password" rather than "change password". Never the hash.
+    has_password: bool = False
     #: True when a platform operator is acting as this user. The dashboard shows
     #: a banner; the audit log records it independently.
     impersonated: bool = False
+
+
+class AccountUpdate(BaseModel):
+    """What a signed-in user may change about themselves. Not their email:
+    changing the address that receives sign-in links needs a verified handover,
+    which is its own flow."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    full_name: str = Field(min_length=1, max_length=200)
+
+
+class PasswordChange(BaseModel):
+    """Set or change the signed-in user's password.
+
+    ``current_password`` is required whenever the account already has one, and
+    is absent for an account that has only ever signed in by link: following the
+    link already proved control of the inbox, which is exactly what a reset
+    would ask for.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    current_password: SecretStr | None = Field(default=None, max_length=256)
+    #: The bounds that apply when a password is *chosen* — the same ones signup
+    #: enforces (:mod:`app.services.passwords`).
+    new_password: SecretStr = Field(min_length=8, max_length=128)
+
+
+class AccountRegistration(BaseModel):
+    """Create an account: the first step, before any business exists."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    full_name: str = Field(min_length=1, max_length=200)
+    email: EmailStr
+    #: The bounds that apply when a password is chosen (app.services.passwords).
+    password: SecretStr = Field(min_length=8, max_length=128)

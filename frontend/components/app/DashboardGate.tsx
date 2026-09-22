@@ -16,14 +16,15 @@ import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 
 import { Alert } from "@/components/ui/Alert";
-import { Button, ButtonLink } from "@/components/ui/Button";
+import { Button } from "@/components/ui/Button";
 import { LogoMark } from "@/components/ui/Logo";
 import { Spinner } from "@/components/ui/Spinner";
-import { ApiError, getSessionOrNull, logout } from "@/lib/api";
+import { ApiError, getSessionOrNull } from "@/lib/api";
+import { ONBOARDING_PATH } from "@/lib/routing";
 import type { SessionView } from "@/lib/types";
 
-import { AppShell } from "./AppShell";
 import { TenantWorkspace } from "./TenantWorkspace";
+import { WorkspaceFrame } from "./WorkspaceFrame";
 
 type GateState =
   | { status: "checking" }
@@ -56,9 +57,14 @@ export function DashboardGate({ children }: { children: ReactNode }) {
     };
   }, [attempt]);
 
+  // No business yet means onboarding is unfinished: resume the setup form,
+  // which reopens the saved draft.
+  const needsOnboarding = state.status === "signed_in" && state.session.memberships.length === 0;
+
   useEffect(() => {
     if (state.status === "signed_out") router.replace("/login");
-  }, [state.status, router]);
+    else if (needsOnboarding) router.replace(ONBOARDING_PATH);
+  }, [state.status, needsOnboarding, router]);
 
   const onSignedOut = useCallback(() => setState({ status: "signed_out" }), []);
 
@@ -101,38 +107,20 @@ export function DashboardGate({ children }: { children: ReactNode }) {
   const { session } = state;
 
   if (session.memberships.length === 0) {
+    // The effect above is taking them to the setup form.
     return (
       <CenteredPanel>
-        <div className="card w-full max-w-md p-8 text-left">
-          <h1 className="text-xl font-bold tracking-tight">No organizations yet</h1>
-          <p className="mt-3 text-sm leading-relaxed text-muted">
-            You&apos;re signed in as <span className="font-medium text-ink">{session.email}</span>,
-            but this account isn&apos;t a member of any business. If you were invited, accept the
-            invitation from the email you received.
-          </p>
-          <div className="mt-6 flex flex-wrap gap-2.5">
-            <ButtonLink href="/get-started">Set up a receptionist</ButtonLink>
-            <Button
-              variant="secondary"
-              onClick={async () => {
-                try {
-                  await logout();
-                } finally {
-                  onSignedOut();
-                }
-              }}
-            >
-              Sign out
-            </Button>
-          </div>
-        </div>
+        <Spinner className="size-5 text-accent" />
+        <p role="status" className="mt-3 text-sm text-muted">
+          Taking you to set up your business…
+        </p>
       </CenteredPanel>
     );
   }
 
   return (
     <TenantWorkspace session={session} onSignedOut={onSignedOut}>
-      <AppShell>{children}</AppShell>
+      <WorkspaceFrame>{children}</WorkspaceFrame>
     </TenantWorkspace>
   );
 }

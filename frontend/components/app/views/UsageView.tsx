@@ -10,17 +10,20 @@ import { PageHeader } from "@/components/ui/PageHeader";
 import { formatCalendarDate, formatNumber } from "@/lib/format";
 import { planName } from "@/lib/plans";
 
-export function UsageView() {
+/** `embedded` drops the page header, for use as a section of Settings. */
+export function UsageView({ embedded = false }: { embedded?: boolean } = {}) {
   const { usage } = useTenantData();
   const remaining = Math.max(0, usage.included_minutes - usage.call_minutes);
   const average = usage.call_count > 0 ? usage.call_minutes / usage.call_count : null;
 
   return (
     <div className="space-y-6 lg:space-y-8">
-      <PageHeader
-        title="Usage"
-        description="Calls and minutes for your current billing period, measured against your plan."
-      />
+      {!embedded && (
+        <PageHeader
+          title="Usage"
+          description="Calls and minutes for your current billing period, measured against your plan."
+        />
+      )}
 
       <UsageNotice usage={usage} />
 
@@ -56,7 +59,7 @@ export function UsageView() {
           title="Plan limits"
           description={`You're on ${planName(usage.plan)}.`}
           action={
-            <ButtonLink href="/dashboard/billing" variant="ghost" size="sm">
+            <ButtonLink href="/dashboard/settings/billing" variant="ghost" size="sm">
               View plan
             </ButtonLink>
           }

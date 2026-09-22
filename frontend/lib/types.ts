@@ -77,11 +77,11 @@ export interface SignupRequest {
   plan: Plan;
   contact_phone: string;
   /**
-   * The password for the owner's account. The web form always sends one; the
-   * backend treats it as optional because other signup sources (the Tally
-   * webhook) have no such field, and an account without one signs in by link.
+   * Only for the anonymous signup API. The web form no longer sends one: the
+   * account is created first (`registerAccount`), and the business form is
+   * submitted as that account (`OnboardingRequest`, which has no password).
    */
-  password: string;
+  password?: string;
 }
 
 export interface SignupResponse {
@@ -104,6 +104,12 @@ export interface SignupResponse {
    * leaked through Referer headers, history and screenshots.
    */
   status_token: string;
+  /**
+   * True when this signup created a new account with the password just chosen,
+   * and the response also set the session cookie. The form then continues to
+   * the signed-in setup page instead of the anonymous status page.
+   */
+  signed_in?: boolean;
 }
 
 /** Mirrors `StepStatus` on the backend. */
@@ -328,6 +334,8 @@ export interface SessionView {
   full_name: string | null;
   is_platform_admin: boolean;
   active_tenant_id: string | null;
+  /** Whether the account can sign in with a password. Never the hash. */
+  has_password?: boolean;
   memberships: TenantMembership[];
   impersonated: boolean;
 }
@@ -413,4 +421,179 @@ export interface ReadinessView {
   status: "ready" | "not_ready";
   checks: Record<string, ReadinessCheck>;
   degraded: string[];
+}
+
+// ---------------------------------------------------------------------------
+// Customer portal — mirrors `app/schemas/portal.py`
+// ---------------------------------------------------------------------------
+
+/** The Home numbers. Only what is recorded; nothing here is estimated. */
+export interface DashboardSummaryView {
+  window_days: number;
+  window_start: string;
+  answered_calls: number;
+  average_duration_s: number | null;
+  urgent_calls: number;
+  callbacks_requested: number;
+  unique_callers: number;
+  total_contacts: number;
+}
+
+export interface TranscriptTurnView {
+  /** `agent` or `user`, as the voice vendor labels speakers. */
+  role: string;
+  message: string;
+  time_in_call_s: number | null;
+}
+
+export interface CallDetailView extends CallView {
+  to_e164: string | null;
+  agent_config_version: number | null;
+  transcript: TranscriptTurnView[];
+  recording_available: boolean;
+}
+
+/** A caller, derived from call history. Not a CRM record. */
+export interface ContactView {
+  phone_e164: string;
+  name: string | null;
+  call_count: number;
+  first_call_at: string | null;
+  last_call_at: string | null;
+  last_summary: string | null;
+  last_intent: string | null;
+  has_urgent: boolean;
+}
+
+export interface ConfigVersionView {
+  version: number;
+  is_live: boolean;
+  generated_by: string;
+  created_at: string;
+}
+
+export interface AgentSettingsUpdate {
+  services: string;
+  operating_hours: string;
+  greeting_style: GreetingStyle;
+  custom_greeting: string;
+  escalation_rules: string;
+}
+
+export interface AgentUpdateResult {
+  config_version: number;
+  previous_version: number | null;
+  generated_by: string;
+  /** False when the new version is saved but the voice agent is not updated yet. */
+  synced: boolean;
+  detail: string;
+}
+
+export interface RetryResult {
+  run_id: string;
+  status: string;
+  steps_reset: string[];
+}
+
+export type IntegrationAvailability = "available" | "configuration_required" | "coming_soon";
+export type IntegrationStatus = "not_connected" | "connected" | "error";
+
+export interface IntegrationView {
+  id: string;
+  name: string;
+  vendor: string;
+  category: string;
+  description: string;
+  icon: string;
+  auth_type: string;
+  capabilities: string[];
+  availability: IntegrationAvailability;
+  status: IntegrationStatus;
+  account: string | null;
+  connected_at: string | null;
+  last_error: string | null;
+}
+
+export interface IntegrationListView {
+  business_type: string;
+  integrations: IntegrationView[];
+}
+
+export interface IntegrationCheckView {
+  ok: boolean;
+  window_start: string;
+  window_end: string;
+  busy_blocks: number;
+}
+
+export type SmsState =
+  | "not_configured"
+  | "compliance_required"
+  | "draft"
+  | "submitted"
+  | "under_review"
+  | "approved"
+  | "rejected"
+  | "enabled";
+
+export const SMS_USE_CASES = [
+  { value: "customer_care", label: "Customer care" },
+  { value: "account_notification", label: "Account notifications" },
+  { value: "appointment_reminders", label: "Appointment reminders" },
+  { value: "marketing", label: "Marketing" },
+  { value: "mixed", label: "Mixed" },
+] as const;
+
+export type SmsUseCase = (typeof SMS_USE_CASES)[number]["value"];
+export type SmsBrandType = "standard" | "sole_proprietor";
+
+/** What the customer fills in. Every field optional until submission. */
+export interface SmsRegistrationInput {
+  brand_type: SmsBrandType;
+  legal_business_name: string | null;
+  tax_id: string | null;
+  website: string | null;
+  address_line1: string | null;
+  address_line2: string | null;
+  city: string | null;
+  region: string | null;
+  postal_code: string | null;
+  contact_name: string | null;
+  contact_email: string | null;
+  contact_phone: string | null;
+  use_case: SmsUseCase | null;
+  campaign_description: string | null;
+  sample_messages: string[];
+  opt_in_description: string | null;
+}
+
+export interface SmsRegistrationView extends SmsRegistrationInput {
+  status: SmsState;
+  country: string;
+  rejection_reason: string | null;
+  submitted_at: string | null;
+  approved_at: string | null;
+  enabled_at: string | null;
+}
+
+export interface SmsStateView {
+  state: SmsState;
+  phone_number: string | null;
+  /** The one flag campaign controls obey. True only when enabled. */
+  can_send: boolean;
+  editable: boolean;
+  registration: SmsRegistrationView | null;
+}
+
+// ---------------------------------------------------------------------------
+// Onboarding — account first, then the business
+// ---------------------------------------------------------------------------
+
+/** The business-setup form, for a signed-in account. No password: it has one. */
+export type OnboardingRequest = Omit<SignupRequest, "password">;
+
+/** The unfinished form, as saved. `data` is whatever the form stored. */
+export interface OnboardingDraftView {
+  data: Record<string, unknown> | null;
+  updated_at: string | null;
 }

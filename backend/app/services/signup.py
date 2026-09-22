@@ -22,6 +22,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
+from app.core.errors import ConflictError
 from app.core.logging import get_logger
 from app.data.area_codes import timezone_for_area_code
 from app.models import BusinessProfile, ProvisioningRun, ProvisioningStepRecord, Tenant
@@ -78,13 +79,27 @@ class SignupService:
         # yes. Failing closed is the right default for a money decision.
         self.settings = settings
 
-    async def submit(self, request: SignupRequest, *, correlation_id: str) -> SignupResult:
+    async def submit(
+        self,
+        request: SignupRequest,
+        *,
+        correlation_id: str,
+        owner: User | None = None,
+    ) -> SignupResult:
         """Accept a signup, or return the existing one for this business.
 
         Duplicate submissions are the normal case, not an error: people
         double-click, and forms get resubmitted. Returning the existing tenant
         makes the endpoint idempotent, and the database's partial unique index
         makes that true even when two requests race.
+
+        ``owner`` is the signed-in account creating the business (the
+        account-first flow). Given one, the business belongs to *that* account,
+        whatever the contact email says — and a live business on the same
+        contact email that belongs to someone else is refused rather than
+        returned, because returning it would hand this caller another
+        business's id. Without one (the anonymous form, the Tally webhook) the
+        owner is found or created from the email, as before.
         """
         email = normalize_email(str(request.notification_email))
         phone = normalize_phone(request.contact_phone)
@@ -92,6 +107,17 @@ class SignupService:
         timezone = timezone_for_area_code(area_code)
 
         existing = await self._find_live_tenant(email)
+        if (
+            existing is not None
+            and owner is not None
+            and not await self._is_member(owner, existing)
+        ):
+            raise ConflictError(
+                "a business using this contact email is already set up; "
+                "use a different email for this business",
+                code="contact_email_in_use",
+                details={"field": "notification_email"},
+            )
         if existing is not None:
             run = await self._latest_run(existing)
             logger.info(
@@ -115,7 +141,10 @@ class SignupService:
         )
         profile = self._build_profile(request, tenant, timezone)
         run = self._build_run(tenant, correlation_id)
-        owner, password_set = await self._find_or_create_owner(request, email)
+        if owner is not None:
+            password_set = False
+        else:
+            owner, password_set = await self._find_or_create_owner(request, email)
         membership = Membership(
             user_id=owner.id,
             tenant_id=tenant.id,
@@ -138,6 +167,13 @@ class SignupService:
             winner = await self._find_live_tenant(email)
             if winner is None:
                 raise
+            if owner is not None and not await self._is_member(owner, winner):
+                raise ConflictError(
+                    "a business using this contact email is already set up; "
+                    "use a different email for this business",
+                    code="contact_email_in_use",
+                    details={"field": "notification_email"},
+                ) from None
             logger.info(
                 "signup lost a race and adopted the winning tenant",
                 extra={"tenant_id": str(winner.id), "email": email},
@@ -265,6 +301,15 @@ class SignupService:
         ]
 
     # ---- lookups ---------------------------------------------------------
+    async def _is_member(self, user: User, tenant: Tenant) -> bool:
+        return (
+            await self.session.execute(
+                select(Membership.id)
+                .where(Membership.user_id == user.id, Membership.tenant_id == tenant.id)
+                .limit(1)
+            )
+        ).first() is not None
+
     async def _find_live_tenant(self, email: str) -> Tenant | None:
         result = await self.session.execute(
             select(Tenant)

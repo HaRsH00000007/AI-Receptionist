@@ -14,37 +14,33 @@ from __future__ import annotations
 
 import hmac
 import uuid
-from datetime import UTC, datetime
 
 from fastapi import APIRouter, Header, Query
 from sqlalchemy import select
-from temporalio.client import Client
 
 from app.api.deps import ProvidersDep, SettingsDep, TemporalClientDep
 from app.core.config import Settings
 from app.core.errors import AppError, InvalidInputError, NotFoundError
 from app.core.logging import get_logger
 from app.db.session import SessionDep
-from app.models import Agent, AgentConfig, ProvisioningRun, ProvisioningStepRecord, Tenant
+from app.models import Agent, AgentConfig, ProvisioningRun, Tenant
 from app.models.enums import (
-    STEP_SEQUENCE,
-    TERMINAL_RUN_STATUSES,
     AgentStatus,
     ProvisioningStatus,
     ProvisioningStep,
-    StepStatus,
-    TenantStatus,
 )
 from app.provisioning.compensation import compensate_run
+from app.schemas.portal import SmsReviewDecision, SmsStateView
 from app.schemas.views import (
     ActionResult,
     AgentConfigDetailView,
     AgentConfigView,
     RunSummaryView,
 )
+from app.services.config_publishing import push_config_to_agent
 from app.services.config_versions import ConfigVersionService
-from app.services.idempotency import step_idempotency_key, tenant_resource_name
-from app.temporal.client import start_provisioning
+from app.services.provisioning_retry import reset_run_for_retry, restart_workflow
+from app.services.sms_compliance import SmsComplianceService
 
 logger = get_logger(__name__)
 
@@ -136,46 +132,7 @@ async def retry_run(
     if tenant is None:  # pragma: no cover - guarded by a foreign key
         raise NotFoundError("tenant not found", details={"run_id": str(run_id)})
 
-    records = {
-        record.step_name: record
-        for record in (
-            await session.execute(
-                select(ProvisioningStepRecord).where(ProvisioningStepRecord.run_id == run.id)
-            )
-        ).scalars()
-    }
-
-    reset_from = STEP_SEQUENCE.index(from_step) if from_step else None
-    reset: list[str] = []
-
-    for index, step in enumerate(STEP_SEQUENCE):
-        record = records.get(step)
-        if record is None:
-            continue
-        forced = reset_from is not None and index >= reset_from
-        if not forced and record.status is not StepStatus.FAILED:
-            continue
-
-        record.status = StepStatus.PENDING
-        record.attempt = 0
-        record.error = None
-        record.finished_at = None
-        record.started_at = None
-        if forced:
-            # New operation, new key.
-            record.idempotency_key = step_idempotency_key(
-                run.id, step, attempt_group=int(datetime.now(UTC).timestamp())
-            )
-        reset.append(step.value)
-
-    run.status = ProvisioningStatus.DRAFT if reset_from == 0 else _resume_status(run)
-    run.last_error = None
-    run.attempt = 0
-    run.finished_at = None
-    run.next_attempt_at = None
-    if tenant.status is TenantStatus.FAILED:
-        tenant.status = TenantStatus.PENDING
-
+    reset = await reset_run_for_retry(session, run=run, tenant=tenant, from_step=from_step)
     await session.commit()
 
     if settings.uses_temporal:
@@ -188,53 +145,12 @@ async def retry_run(
         # The step rows were just reset above, so the new execution re-walks the
         # sequence from the first step that is not SUCCEEDED. It cannot skip the
         # money gate: `purchase_number` re-checks entitlement itself.
-        await _restart_workflow(temporal, settings, run, tenant)
+        await restart_workflow(temporal, settings, run, tenant)
 
     logger.info("run reset for retry", extra={"run_id": str(run.id), "steps_reset": len(reset)})
     return ActionResult(
         ok=True, detail=f"reset {len(reset)} step(s): {', '.join(reset) or 'none'}", run_id=run.id
     )
-
-
-async def _restart_workflow(
-    temporal: Client | None,
-    settings: Settings,
-    run: ProvisioningRun,
-    tenant: Tenant,
-) -> None:
-    """Start a new workflow execution for a reset run. Never fails the retry.
-
-    The database reset is the part that matters and has already committed. If
-    Temporal is unreachable the run is simply left eligible, and a later retry
-    starts it — which is better than a 500 that leaves the operator unsure
-    whether the reset happened.
-    """
-    if temporal is None:
-        logger.error(
-            "temporal is unavailable; the run was reset but not restarted",
-            extra={"run_id": str(run.id)},
-        )
-        return
-    try:
-        await start_provisioning(
-            temporal,
-            settings,
-            run_id=run.id,
-            tenant_id=tenant.id,
-            correlation_id=run.correlation_id,
-        )
-    except Exception:
-        logger.exception(
-            "could not restart the provisioning workflow",
-            extra={"run_id": str(run.id)},
-        )
-
-
-def _resume_status(run: ProvisioningRun) -> ProvisioningStatus:
-    """Move a terminal run back into the machine without rewinding progress."""
-    if run.status in TERMINAL_RUN_STATUSES:
-        return ProvisioningStatus.DRAFT
-    return run.status
 
 
 @router.post(
@@ -330,16 +246,13 @@ async def resync_agent(
     if config is None:
         raise NotFoundError("tenant has no live config", details={"tenant_id": str(tenant_id)})
 
-    await providers.elevenlabs.update_agent(
-        agent_id=agent.elevenlabs_agent_id,
-        name=tenant_resource_name(tenant.id),
-        system_prompt=config.system_prompt,
-        first_message=config.first_message,
-        voice_id=config.voice_id or settings.elevenlabs_default_voice_id,
+    await push_config_to_agent(
+        settings=settings,
+        voice=providers.elevenlabs,
+        tenant=tenant,
+        agent=agent,
+        config=config,
     )
-
-    agent.agent_config_id = config.id
-    agent.synced_at = datetime.now(UTC)
     await session.commit()
 
     logger.info(
@@ -445,3 +358,29 @@ def _config_view(config: AgentConfig) -> AgentConfigView:
         voice_id=config.voice_id,
         created_at=config.created_at,
     )
+
+
+@router.post(
+    "/tenants/{tenant_id}/sms/review",
+    response_model=SmsStateView,
+    summary="Record the outcome of an SMS registration review",
+)
+async def review_sms_registration(
+    tenant_id: uuid.UUID,
+    decision: SmsReviewDecision,
+    session: SessionDep,
+    settings: SettingsDep,
+    x_admin_key: str | None = Header(default=None),
+) -> SmsStateView:
+    """Move a submitted registration through review.
+
+    The operator's half of SMS compliance until submission to Twilio is
+    automated: record what Trust Hub decided. Transitions that skip a step are
+    refused, a rejection needs a reason the customer can act on, and "enabled"
+    needs the messaging service the number was attached to.
+    """
+    _authorize(settings, x_admin_key)
+    tenant = await session.get(Tenant, tenant_id)
+    if tenant is None:
+        raise NotFoundError("tenant not found", details={"tenant_id": str(tenant_id)})
+    return await SmsComplianceService(session).record_review(tenant, decision)

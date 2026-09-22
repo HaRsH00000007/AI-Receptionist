@@ -203,8 +203,8 @@ export function LoginForm() {
 
       <p className="mt-8 text-sm text-muted">
         New to {BRAND.name}?{" "}
-        <Link href="/get-started" className="link">
-          Set up your receptionist
+        <Link href="/signup" className="link">
+          Create an account
         </Link>
       </p>
     </div>

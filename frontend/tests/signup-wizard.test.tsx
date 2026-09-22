@@ -1,12 +1,12 @@
 /**
  * Onboarding: step validation, the submitted payload, error display, and the
- * redirect to the provisioning status page.
+ * redirect to the signed-in setup page, and the saved draft.
  */
 
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { SignupWizard } from "@/components/onboarding/SignupWizard";
+import { SignupWizard, restoreDraft, type WizardDraft } from "@/components/onboarding/SignupWizard";
 import * as api from "@/lib/api";
 import { ApiError } from "@/lib/api";
 import { greetingPreset } from "@/lib/greetings";
@@ -33,8 +33,6 @@ const CREATED: SignupResponse = {
 
 const FRIENDLY_PRESET = greetingPreset("friendly", "Sunset Salon");
 
-const PASSWORD = "a good long password";
-
 function clickContinue() {
   fireEvent.click(screen.getByRole("button", { name: /continue/i }));
 }
@@ -55,7 +53,6 @@ async function fillReceptionist() {
   fireEvent.change(screen.getByLabelText("Notification email"), {
     target: { value: "owner@sunsetsalon.example.com" },
   });
-  fireEvent.change(screen.getByLabelText("Password"), { target: { value: PASSWORD } });
   clickContinue();
   await screen.findByRole("heading", { name: /choose your phone number/i });
 }
@@ -79,6 +76,8 @@ function clickActivate() {
 
 beforeEach(() => {
   push.mockReset();
+  // The form saves itself to the account as it changes; never a real request.
+  vi.spyOn(api, "saveOnboardingDraft").mockResolvedValue({ data: null, updated_at: null });
 });
 
 afterEach(() => {
@@ -88,15 +87,15 @@ afterEach(() => {
 
 describe("SignupWizard", () => {
   it("walks through the steps and submits exactly what was entered", async () => {
-    const submit = vi.spyOn(api, "submitSignup").mockResolvedValue(CREATED);
+    const submit = vi.spyOn(api, "submitOnboarding").mockResolvedValue(CREATED);
 
     render(<SignupWizard />);
     await fillToReview();
     clickActivate();
 
-    // The grant must travel with the redirect. Without it the status page has
-    // no credential and every read is refused.
-    await vi.waitFor(() => expect(push).toHaveBeenCalledWith("/status/tenant-123?t=v1.grant.token"));
+    // The business belongs to the signed-in account, so the owner watches
+    // setup from the account rather than from an anonymous status link.
+    await vi.waitFor(() => expect(push).toHaveBeenCalledWith("/dashboard/setup"));
     expect(submit).toHaveBeenCalledWith({
       business_name: "Sunset Salon",
       business_type: "salon",
@@ -107,17 +106,16 @@ describe("SignupWizard", () => {
       selected_number: "",
       escalation_rules: "",
       notification_email: "owner@sunsetsalon.example.com",
-      // Sent exactly as typed. The email either side of it is trimmed; the
-      // password is not, because a space someone chose is part of it.
-      password: PASSWORD,
       area_code: "805",
       plan: "starter",
       contact_phone: "8055550142",
     });
+    // No password: the account already has one.
+    expect(submit.mock.calls[0]![0]).not.toHaveProperty("password");
   });
 
   it("won't move past a step with missing details", () => {
-    const submit = vi.spyOn(api, "submitSignup");
+    const submit = vi.spyOn(api, "submitOnboarding");
 
     render(<SignupWizard />);
     clickContinue();
@@ -139,7 +137,7 @@ describe("SignupWizard", () => {
   });
 
   it("sends the chosen plan", async () => {
-    const submit = vi.spyOn(api, "submitSignup").mockResolvedValue(CREATED);
+    const submit = vi.spyOn(api, "submitOnboarding").mockResolvedValue(CREATED);
 
     render(<SignupWizard />);
     await fillToReview();
@@ -149,17 +147,15 @@ describe("SignupWizard", () => {
     await vi.waitFor(() => expect(submit).toHaveBeenCalledWith(expect.objectContaining({ plan: "pro" })));
   });
 
-  it("carries the forwarding choice through to the status page", async () => {
-    vi.spyOn(api, "submitSignup").mockResolvedValue(CREATED);
+  it("shows the forwarding choice on the review before activating", async () => {
+    vi.spyOn(api, "submitOnboarding").mockResolvedValue(CREATED);
 
     render(<SignupWizard />);
     await fillToReview({ forward: true });
     expect(screen.getByText(/your existing number forwards to it/i)).toBeInTheDocument();
     clickActivate();
 
-    await vi.waitFor(() =>
-      expect(push).toHaveBeenCalledWith("/status/tenant-123?t=v1.grant.token&setup=forward"),
-    );
+    await vi.waitFor(() => expect(push).toHaveBeenCalledWith("/dashboard/setup"));
   });
 
   it("shows exactly what will be set up before activating", async () => {
@@ -181,7 +177,7 @@ describe("SignupWizard", () => {
   });
 
   it("shows the API's message and reference, and returns to the field it names", async () => {
-    vi.spyOn(api, "submitSignup").mockRejectedValue(
+    vi.spyOn(api, "submitOnboarding").mockRejectedValue(
       new ApiError("area code must be exactly 3 digits", {
         status: 422,
         code: "invalid_input",
@@ -203,7 +199,7 @@ describe("SignupWizard", () => {
   });
 
   it("re-enables activation after a failure so the user can try again", async () => {
-    vi.spyOn(api, "submitSignup").mockRejectedValue(
+    vi.spyOn(api, "submitOnboarding").mockRejectedValue(
       new ApiError("server unavailable", { status: 0, code: "network_error" }),
     );
 
@@ -216,60 +212,76 @@ describe("SignupWizard", () => {
   });
 });
 
-describe("the account password", () => {
-  it("won't move on without one", async () => {
-    render(<SignupWizard />);
+describe("an account-first form", () => {
+  it("asks for no password — the account already has one", async () => {
+    render(<SignupWizard accountEmail="dana@example.com" />);
     await fillBusiness();
-    fireEvent.change(screen.getByLabelText("Operating hours"), { target: { value: "Mon-Fri 9-6" } });
-    fireEvent.change(screen.getByLabelText("Notification email"), {
-      target: { value: "owner@sunsetsalon.example.com" },
-    });
-    clickContinue();
+    expect(screen.queryByLabelText("Password")).not.toBeInTheDocument();
+  });
 
-    expect(screen.getByText(/at least 8 characters/i)).toBeInTheDocument();
+  it("starts the notification email as the account's email", async () => {
+    render(<SignupWizard accountEmail="dana@example.com" />);
+    await fillBusiness();
+    expect(screen.getByLabelText("Notification email")).toHaveValue("dana@example.com");
+  });
+
+  it("saves progress to the account as it is filled in", async () => {
+    const save = vi.mocked(api.saveOnboardingDraft);
+    render(<SignupWizard accountEmail="dana@example.com" />);
+    fireEvent.change(screen.getByLabelText("Business name"), { target: { value: "Sunset Salon" } });
+
+    await vi.waitFor(() => expect(save).toHaveBeenCalled(), { timeout: 3000 });
+    const saved = save.mock.calls.at(-1)![0] as unknown as WizardDraft;
+    expect(saved.values.business_name).toBe("Sunset Salon");
+    expect(saved.step).toBe(0);
+    expect(JSON.stringify(saved)).not.toMatch(/password/i);
+    expect(await screen.findByText("Progress saved")).toBeInTheDocument();
+  });
+
+  it("reopens a saved form where it was left", async () => {
+    const draft = restoreDraft(
+      {
+        step: 1,
+        values: { business_name: "Sunset Salon", services: "cuts", contact_phone: 42 },
+        greetingChoice: "custom",
+        customGreeting: "Sunset Salon, how can I help?",
+        unexpected: "ignored",
+      },
+      "dana@example.com",
+    );
+    render(<SignupWizard accountEmail="dana@example.com" draft={draft} />);
+
     expect(
       screen.getByRole("heading", { name: /how should your receptionist answer/i }),
     ).toBeInTheDocument();
+    expect(screen.getByLabelText("Your opening line")).toHaveValue("Sunset Salon, how can I help?");
+    // A field of the wrong type in a draft falls back to its default.
+    expect(draft.values.contact_phone).toBe("");
+    expect(draft.values.notification_email).toBe("dana@example.com");
   });
 
-  it("rejects one that the backend would reject", async () => {
-    // Pinned to `MIN_LENGTH` in `app/services/passwords.py`. A form that
-    // accepted seven characters would fail at the API with a message arriving
-    // three steps later, on the review page.
+  it("sends a contact-email clash back to the field", async () => {
+    vi.spyOn(api, "submitOnboarding").mockRejectedValue(
+      new ApiError("a business using this contact email is already set up", {
+        status: 409,
+        code: "contact_email_in_use",
+        fieldErrors: { notification_email: "a business using this contact email is already set up" },
+      }),
+    );
     render(<SignupWizard />);
-    await fillBusiness();
-    fireEvent.change(screen.getByLabelText("Password"), { target: { value: "1234567" } });
-    clickContinue();
+    await fillToReview();
+    clickActivate();
 
-    expect(screen.getByText(/at least 8 characters/i)).toBeInTheDocument();
-  });
-
-  it("is hidden while typing and can be revealed to check it", async () => {
-    render(<SignupWizard />);
-    await fillBusiness();
-    const field = screen.getByLabelText("Password");
-
-    expect(field).toHaveAttribute("type", "password");
-    fireEvent.click(screen.getByRole("button", { name: /show password/i }));
-    expect(screen.getByLabelText("Password")).toHaveAttribute("type", "text");
-  });
-
-  it("never shows the password back on the review page", async () => {
-    render(<SignupWizard />);
-    await fillBusiness();
-    await fillReceptionist();
-    await fillPhone();
-
-    // Not even masked. This is the page most likely to be screenshotted or
-    // read over a shoulder.
-    expect(screen.queryByText(PASSWORD)).not.toBeInTheDocument();
-    expect(screen.getByText(/and your password/i)).toBeInTheDocument();
+    expect(
+      await screen.findByRole("heading", { name: /how should your receptionist answer/i }),
+    ).toBeInTheDocument();
+    expect(push).not.toHaveBeenCalled();
   });
 });
 
 describe("the opening line", () => {
   it("defaults to letting setup write one", async () => {
-    const submit = vi.spyOn(api, "submitSignup").mockResolvedValue(CREATED);
+    const submit = vi.spyOn(api, "submitOnboarding").mockResolvedValue(CREATED);
 
     render(<SignupWizard />);
     await fillToReview();
@@ -284,7 +296,7 @@ describe("the opening line", () => {
   it("sends the ready-made line when it is chosen", async () => {
     // What the customer read on screen is what the caller hears, so the exact
     // preset text is submitted rather than a code the backend re-expands.
-    const submit = vi.spyOn(api, "submitSignup").mockResolvedValue(CREATED);
+    const submit = vi.spyOn(api, "submitOnboarding").mockResolvedValue(CREATED);
 
     render(<SignupWizard />);
     await fillBusiness();
@@ -294,7 +306,6 @@ describe("the opening line", () => {
     fireEvent.change(screen.getByLabelText("Notification email"), {
       target: { value: "owner@sunsetsalon.example.com" },
     });
-    fireEvent.change(screen.getByLabelText("Password"), { target: { value: PASSWORD } });
     clickContinue();
     await fillPhone();
     clickActivate();
@@ -305,7 +316,7 @@ describe("the opening line", () => {
   });
 
   it("sends the owner's own wording", async () => {
-    const submit = vi.spyOn(api, "submitSignup").mockResolvedValue(CREATED);
+    const submit = vi.spyOn(api, "submitOnboarding").mockResolvedValue(CREATED);
     const own = "Sunset Salon, Dana speaking — how can I help?";
 
     render(<SignupWizard />);
@@ -316,7 +327,6 @@ describe("the opening line", () => {
     fireEvent.change(screen.getByLabelText("Notification email"), {
       target: { value: "owner@sunsetsalon.example.com" },
     });
-    fireEvent.change(screen.getByLabelText("Password"), { target: { value: PASSWORD } });
     clickContinue();
     await fillPhone();
 
@@ -329,7 +339,7 @@ describe("the opening line", () => {
   });
 
   it("asks for the wording when the owner said they would write it", async () => {
-    const submit = vi.spyOn(api, "submitSignup");
+    const submit = vi.spyOn(api, "submitOnboarding");
 
     render(<SignupWizard />);
     await fillBusiness();
@@ -338,7 +348,6 @@ describe("the opening line", () => {
     fireEvent.change(screen.getByLabelText("Notification email"), {
       target: { value: "owner@sunsetsalon.example.com" },
     });
-    fireEvent.change(screen.getByLabelText("Password"), { target: { value: PASSWORD } });
     clickContinue();
 
     expect(screen.getByText(/write the line your receptionist should say/i)).toBeInTheDocument();
@@ -386,7 +395,6 @@ describe("choosing a phone number", () => {
     fireEvent.change(screen.getByLabelText("Notification email"), {
       target: { value: "owner@sunsetsalon.example.com" },
     });
-    fireEvent.change(screen.getByLabelText("Password"), { target: { value: PASSWORD } });
     clickContinue();
     await screen.findByRole("heading", { name: /choose your phone number/i });
   }
@@ -398,7 +406,7 @@ describe("choosing a phone number", () => {
 
   it("offers the numbers available and submits the one picked", async () => {
     const find = vi.spyOn(api, "searchAvailableNumbers").mockResolvedValue(IN_AREA_CODE);
-    const submit = vi.spyOn(api, "submitSignup").mockResolvedValue(CREATED);
+    const submit = vi.spyOn(api, "submitOnboarding").mockResolvedValue(CREATED);
 
     await reachPhoneStep();
     search("805");
@@ -460,7 +468,7 @@ describe("choosing a phone number", () => {
     vi.spyOn(api, "searchAvailableNumbers").mockRejectedValue(
       new ApiError("Could not reach the server.", { status: 0, code: "network_error" }),
     );
-    const submit = vi.spyOn(api, "submitSignup").mockResolvedValue(CREATED);
+    const submit = vi.spyOn(api, "submitOnboarding").mockResolvedValue(CREATED);
 
     await reachPhoneStep();
     search("805");

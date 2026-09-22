@@ -130,6 +130,18 @@ class AuthorizationError(TerminalError):
     http_status = 403
 
 
+class ConflictError(TerminalError):
+    """The request is valid, but not in the resource's current state.
+
+    409: retrying a run that has not failed, submitting an SMS registration that
+    is already under review. Nothing is wrong with the input — the same request
+    would succeed at a different moment.
+    """
+
+    code = "conflict"
+    http_status = 409
+
+
 class DryRunError(TerminalError):
     """A real side effect was attempted while ``DRY_RUN`` is enabled."""
 

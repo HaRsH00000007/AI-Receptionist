@@ -243,15 +243,22 @@ async def list_calls(
     tenant_id: TenantReadDep,
     session: SessionDep,
     limit: int = Query(default=25, ge=1, le=100),
+    caller: str | None = Query(
+        default=None,
+        max_length=20,
+        description="Only calls from this number (E.164), for a contact's history.",
+    ),
 ) -> list[CallView]:
     await _load_tenant(session, tenant_id)
+    query = select(Call).where(Call.tenant_id == tenant_id)
+    if caller:
+        query = query.where(Call.from_e164 == caller)
     calls = (
         (
             await session.execute(
-                select(Call)
-                .where(Call.tenant_id == tenant_id)
-                .order_by(Call.started_at.desc().nulls_last(), Call.created_at.desc())
-                .limit(limit)
+                query.order_by(Call.started_at.desc().nulls_last(), Call.created_at.desc()).limit(
+                    limit
+                )
             )
         )
         .scalars()

@@ -1,6 +1,6 @@
 /**
  * The customer dashboard: the shell, the workspace that loads a tenant, and
- * the overview page.
+ * the Home page.
  *
  * The property that matters most here is not visual: the dashboard never
  * decides who the viewer is. The tenant id comes from the session's
@@ -15,7 +15,7 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-li
 
 import { AppShell } from "@/components/app/AppShell";
 import { TenantWorkspace } from "@/components/app/TenantWorkspace";
-import { OverviewView } from "@/components/app/views/OverviewView";
+import { HomeView } from "@/components/app/views/HomeView";
 import { ApiError } from "@/lib/api";
 import type { CallView, SessionView } from "@/lib/types";
 
@@ -36,6 +36,10 @@ vi.mock("@/lib/api", async () => {
     getUsage: vi.fn(),
     listCalls: vi.fn(),
     getProfileOrNull: vi.fn(),
+    getDashboardSummary: vi.fn(),
+    listIntegrations: vi.fn(),
+    getSmsState: vi.fn(),
+    getCallDetail: vi.fn(),
     logout: vi.fn(),
   };
 });
@@ -133,13 +137,41 @@ function givenHealthyTenant(usage: Record<string, unknown> = {}, calls: CallView
     greeting: "Hi, thanks for calling Sunset Salon!",
     config_version: 3,
   });
+  vi.mocked(api.getDashboardSummary).mockResolvedValue({
+    window_days: 30,
+    window_start: "2026-08-12T00:00:00Z",
+    answered_calls: 12,
+    average_duration_s: 95,
+    urgent_calls: 1,
+    callbacks_requested: 1,
+    unique_callers: 9,
+    total_contacts: 11,
+  });
+  vi.mocked(api.listIntegrations).mockResolvedValue({ business_type: "salon", integrations: [] });
+  vi.mocked(api.getSmsState).mockResolvedValue({
+    state: "compliance_required",
+    phone_number: "+18055550100",
+    can_send: false,
+    editable: true,
+    registration: null,
+  });
+  vi.mocked(api.getCallDetail).mockImplementation(async () => ({
+    ...CALL,
+    to_e164: "+18055550100",
+    agent_config_version: 3,
+    recording_available: false,
+    transcript: [
+      { role: "agent", message: "Thanks for calling Sunset Salon!", time_in_call_s: 0 },
+      { role: "user", message: "Do you have anything Thursday?", time_in_call_s: 2 },
+    ],
+  }));
 }
 
 function renderDashboard(session: SessionView = SESSION, onSignedOut: () => void = () => {}) {
   return render(
     <TenantWorkspace session={session} onSignedOut={onSignedOut}>
       <AppShell>
-        <OverviewView />
+        <HomeView />
       </AppShell>
     </TenantWorkspace>,
   );
@@ -164,7 +196,7 @@ describe("the dashboard", () => {
 
   it("offers a test call to the live number", async () => {
     renderDashboard();
-    const link = await screen.findByRole("link", { name: /test receptionist/i });
+    const link = await screen.findByRole("link", { name: /call your agent/i });
     expect(link).toHaveAttribute("href", "tel:+18055550100");
   });
 
@@ -186,7 +218,10 @@ describe("the dashboard", () => {
       "tel:+15551110000",
     );
     expect(dialog.querySelector('a[href="tel:+15559998888"]')).toBeNull();
-    expect(within(dialog).getByText(/transcripts and recordings aren.t displayed/i)).toBeInTheDocument();
+    // The transcript is fetched for this call, for this tenant only.
+    expect(await within(dialog).findByText("Do you have anything Thursday?")).toBeInTheDocument();
+    expect(vi.mocked(api.getCallDetail)).toHaveBeenCalledWith("t1", "call1");
+    expect(within(dialog).getByText(/recordings aren.t captured yet/i)).toBeInTheDocument();
   });
 
   it("signs the viewer out when the session has expired", async () => {

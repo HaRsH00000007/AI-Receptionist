@@ -14,13 +14,7 @@ from app.core.errors import InvalidInputError
 from app.core.logging import get_logger
 from app.models import AgentConfig, BusinessProfile
 from app.provisioning.context import StepContext, StepResult
-from app.services.config_generator import ConfigGenerator
-from app.services.config_versions import ConfigVersionService
-from app.services.prompt_renderer import (
-    render_first_message,
-    render_system_prompt,
-    select_voice_id,
-)
+from app.services.config_publishing import generate_and_publish
 
 logger = get_logger(__name__)
 
@@ -55,37 +49,19 @@ async def run(ctx: StepContext) -> StepResult:
             response={"adopted": True, "config_version": existing.version},
         )
 
-    generator = ConfigGenerator(ctx.providers.llm, ctx.settings)
-    outcome = await generator.generate(tenant, profile)
-
-    system_prompt = render_system_prompt(
-        business_name=tenant.name,
-        business_type=tenant.business_type.value,
-        config=outcome.config,
-    )
-    voice_id = select_voice_id(ctx.settings, profile.greeting_style)
-
     # Configs are append-only; the previous live row steps down rather than
-    # being edited, so the history of what was live stays intact. The publish
-    # logic is shared with the admin rollback action and the config editor, so
-    # that "demote then promote" exists once rather than three times.
-    published = await ConfigVersionService(ctx.session).publish(
-        tenant_id=tenant.id,
-        system_prompt=system_prompt,
-        first_message=render_first_message(outcome.config),
-        voice_id=voice_id,
-        model_params={
-            "generated": outcome.config.model_dump(mode="json"),
-            # Recorded so a config can be reproduced: which model produced it,
-            # at what sampling temperature, against which prompt template.
-            "temperature": ctx.settings.llm_temperature,
-            "model": ctx.settings.llm_config_model,
-            "provider": ctx.providers.llm.name,
-        },
-        generated_by=outcome.source,
-        generator_detail=outcome.detail,
-        template_version=outcome.template_version,
+    # being edited, so the history of what was live stays intact. Generation and
+    # publishing are shared with the customer's agent editor, so a receptionist
+    # rebuilt after an edit is built exactly the way a new one is.
+    result = await generate_and_publish(
+        ctx.session,
+        settings=ctx.settings,
+        llm=ctx.providers.llm,
+        tenant=tenant,
+        profile=profile,
     )
+    outcome = result.outcome
+    published = result.published
     config = published.config
 
     return StepResult(
@@ -100,8 +76,8 @@ async def run(ctx: StepContext) -> StepResult:
             "replaced_version": published.previous_version,
             "generated_by": outcome.source.value,
             "generator_detail": outcome.detail,
-            "voice_id": voice_id,
-            "system_prompt_chars": len(system_prompt),
+            "voice_id": result.voice_id,
+            "system_prompt_chars": result.system_prompt_chars,
             "services": len(outcome.config.services),
         },
     )

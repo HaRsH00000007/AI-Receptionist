@@ -9,7 +9,19 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
-from app.api.v1 import admin, auth, numbers, signups, tenants, voice, webhooks
+from app.api.v1 import (
+    admin,
+    auth,
+    integrations,
+    numbers,
+    onboarding,
+    portal,
+    signups,
+    sms,
+    tenants,
+    voice,
+    webhooks,
+)
 
 router = APIRouter()
 # Auth first: it is the only unauthenticated group, and reading it first
@@ -19,7 +31,14 @@ router.include_router(auth.router)
 # choose from before anyone has an account. It searches and never buys.
 router.include_router(numbers.router)
 router.include_router(signups.router)
+# The same form for someone already signed in: the account-first flow.
+router.include_router(onboarding.router)
 router.include_router(tenants.router)
+# The signed-in portal. Same `/tenants/{id}` prefix, but membership-only: none
+# of it is reachable with the status grant that opens the post-signup page.
+router.include_router(portal.router)
+router.include_router(integrations.router)
+router.include_router(sms.router)
 router.include_router(webhooks.router)
 # The audible call path. Unauthenticated like the webhooks, and verified the
 # same way — Twilio's signature is what stops anyone choosing whose agent answers.

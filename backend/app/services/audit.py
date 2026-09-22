@@ -11,6 +11,7 @@ application did.
 from __future__ import annotations
 
 import uuid
+from dataclasses import dataclass
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -71,6 +72,19 @@ def redact(meta: dict[str, Any]) -> dict[str, Any]:
         else:
             cleaned[key] = value
     return cleaned
+
+
+@dataclass(frozen=True, slots=True)
+class Actor:
+    """Who did something, as the audit log should record them.
+
+    Carried as a pair because the type is not derivable from the user alone: the
+    same operator is ``admin`` acting as themselves and ``impersonation`` acting
+    as a customer, and the log must never blur the two.
+    """
+
+    user: User
+    actor_type: ActorType
 
 
 class AuditService:

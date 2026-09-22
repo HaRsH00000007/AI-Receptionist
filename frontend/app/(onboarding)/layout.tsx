@@ -1,5 +1,5 @@
 import { ThemeToggle } from "@/app/ThemeToggle";
-import { ButtonLink } from "@/components/ui/Button";
+import { SignInPrompt } from "@/components/onboarding/SignInPrompt";
 import { Logo } from "@/components/ui/Logo";
 
 export default function OnboardingLayout({ children }: { children: React.ReactNode }) {
@@ -9,10 +9,7 @@ export default function OnboardingLayout({ children }: { children: React.ReactNo
         <div className="container-page flex h-16 items-center justify-between gap-4">
           <Logo />
           <div className="flex items-center gap-1 sm:gap-2">
-            <span className="hidden text-sm text-muted sm:inline">Already have an account?</span>
-            <ButtonLink href="/login" variant="ghost" size="sm">
-              Sign in
-            </ButtonLink>
+            <SignInPrompt />
             <ThemeToggle />
           </div>
         </div>

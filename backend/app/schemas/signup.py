@@ -154,6 +154,46 @@ class SignupRequest(BaseModel):
         return self
 
 
+class OnboardingRequest(SignupRequest):
+    """The business-setup form, submitted by someone already signed in.
+
+    The same fields as a public signup, less the password: the account exists
+    already, and its owner is the session, not whoever the email names. A
+    password sent here is refused rather than ignored, so a client that still
+    sends one finds out instead of believing it set something.
+    """
+
+    @field_validator("password")
+    @classmethod
+    def _no_password_here(cls, value: SecretStr) -> SecretStr:
+        if value.get_secret_value():
+            raise ValueError("the account already has a password; change it in Settings")
+        return value
+
+
+class OnboardingDraftInput(BaseModel):
+    """What the form has so far. Free-form, bounded, never a password."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    data: dict[str, Any]
+
+    @field_validator("data")
+    @classmethod
+    def _bounded_and_passwordless(cls, value: dict[str, Any]) -> dict[str, Any]:
+        import json
+
+        cleaned = {key: item for key, item in value.items() if "password" not in key.lower()}
+        if len(json.dumps(cleaned, default=str)) > 20_000:
+            raise ValueError("the draft is too large")
+        return cleaned
+
+
+class OnboardingDraftView(BaseModel):
+    data: dict[str, Any] | None
+    updated_at: datetime | None
+
+
 class SignupStepView(BaseModel):
     """One provisioning step, as the status page shows it."""
 
@@ -188,6 +228,12 @@ class SignupResponse(BaseModel):
     #: expired, could not be revoked, and leaked through Referer headers,
     #: browser history and screenshots.
     status_token: str
+    #: True when this signup created a new account with the password just
+    #: submitted, and the response therefore also set a session cookie. The
+    #: form can then take the owner straight to their signed-in setup page
+    #: instead of the anonymous status page. Always false for an address that
+    #: already had an account — see ``SignupService._find_or_create_owner``.
+    signed_in: bool = False
 
 
 class SignupAcceptedHeaders(BaseModel):

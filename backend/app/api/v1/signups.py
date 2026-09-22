@@ -14,6 +14,7 @@ from typing import Any
 
 from fastapi import APIRouter, Request, Response, status
 
+from app.api.auth_deps import client_ip, set_session_cookie
 from app.api.deps import SettingsDep, TemporalClientDep
 from app.core.config import Settings
 from app.core.correlation import get_correlation_id, new_correlation_id
@@ -21,6 +22,7 @@ from app.core.errors import InvalidInputError
 from app.core.logging import get_logger
 from app.db.session import SessionDep
 from app.schemas.signup import SignupRequest, SignupResponse, TallyWebhook
+from app.services.auth import AuthService
 from app.services.signup import SignupResult, SignupService
 from app.services.status_tokens import issue_status_token
 from app.services.tally import tally_to_signup
@@ -52,6 +54,20 @@ async def _submit(
     correlation_id = get_correlation_id() or new_correlation_id()
     result = await SignupService(session, settings).submit(payload, correlation_id=correlation_id)
 
+    # Sign the owner in, but only when this very request created their account
+    # with the password they just typed. An address that already had an account
+    # is never signed in here: signup is anonymous, so doing that would give a
+    # stranger's account to anyone who entered their email.
+    signed_in = False
+    if result.created and result.password_set and result.owner is not None:
+        issued = await AuthService(session, settings).sign_in_new_account(
+            result.owner,
+            ip_address=client_ip(request),
+            user_agent=request.headers.get("user-agent"),
+        )
+        set_session_cookie(response, settings, issued.token)
+        signed_in = True
+
     if settings.uses_temporal:
         # Committed first: the workflow's activities read this run, so starting
         # before the commit would race a worker against an uncommitted row.
@@ -73,6 +89,7 @@ async def _submit(
         timezone=result.tenant.timezone,
         created=result.created,
         status_token=issue_status_token(settings, result.tenant.id),
+        signed_in=signed_in,
     )
 
 
