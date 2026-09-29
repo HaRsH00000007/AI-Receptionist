@@ -40,3 +40,9 @@ desktop.ini
 # ---- Local data ----------------------------------------------------------
 postgres-data/
 *.log
+
+# ---- ECS deployment (infra/ecs) ------------------------------------------
+# Rendered task definitions are build output; the templates are the source.
+infra/ecs/.rendered/
+# Personal overrides (e.g. EMAIL_FROM) that should not be in a public repo.
+infra/ecs/deploy.local.env

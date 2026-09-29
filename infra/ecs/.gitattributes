@@ -1,0 +1,2 @@
+# The deploy script runs under bash; CRLF would break it on checkout.
+*.sh text eol=lf

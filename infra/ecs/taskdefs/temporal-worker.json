@@ -1,0 +1,49 @@
+{
+  "family": "ai-receptionist-temporal-worker",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": [
+    "FARGATE"
+  ],
+  "cpu": "512",
+  "memory": "1024",
+  "executionRoleArn": "${EXECUTION_ROLE_ARN}",
+  "taskRoleArn": "${TASK_ROLE_ARN}",
+  "runtimePlatform": {
+    "cpuArchitecture": "X86_64",
+    "operatingSystemFamily": "LINUX"
+  },
+  "containerDefinitions": [
+    {
+      "name": "temporal-worker",
+      "essential": true,
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "${LOG_GROUP}",
+          "awslogs-create-group": "true",
+          "awslogs-region": "${AWS_REGION}",
+          "awslogs-stream-prefix": "temporal-worker"
+        }
+      },
+      "image": "${BACKEND_IMAGE}",
+      "environment": "__BACKEND_ENV__",
+      "secrets": "__BACKEND_SECRETS__",
+      "command": [
+        "python",
+        "-m",
+        "app.temporal.worker"
+      ],
+      "stopTimeout": 120
+    }
+  ],
+  "tags": [
+    {
+      "key": "app",
+      "value": "ai-receptionist"
+    },
+    {
+      "key": "git",
+      "value": "${IMAGE_TAG}"
+    }
+  ]
+}

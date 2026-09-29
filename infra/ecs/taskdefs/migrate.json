@@ -1,0 +1,48 @@
+{
+  "family": "ai-receptionist-migrate",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": [
+    "FARGATE"
+  ],
+  "cpu": "256",
+  "memory": "512",
+  "executionRoleArn": "${EXECUTION_ROLE_ARN}",
+  "taskRoleArn": "${TASK_ROLE_ARN}",
+  "runtimePlatform": {
+    "cpuArchitecture": "X86_64",
+    "operatingSystemFamily": "LINUX"
+  },
+  "containerDefinitions": [
+    {
+      "name": "migrate",
+      "essential": true,
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "${LOG_GROUP}",
+          "awslogs-create-group": "true",
+          "awslogs-region": "${AWS_REGION}",
+          "awslogs-stream-prefix": "migrate"
+        }
+      },
+      "image": "${BACKEND_IMAGE}",
+      "environment": "__BACKEND_ENV__",
+      "secrets": "__BACKEND_SECRETS__",
+      "command": [
+        "alembic",
+        "upgrade",
+        "head"
+      ]
+    }
+  ],
+  "tags": [
+    {
+      "key": "app",
+      "value": "ai-receptionist"
+    },
+    {
+      "key": "git",
+      "value": "${IMAGE_TAG}"
+    }
+  ]
+}
