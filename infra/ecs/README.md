@@ -77,7 +77,7 @@ What `deploy.sh` does, in order, stopping at the first failure:
 
 ### Going production-like
 
-Add `ELEVENLABS_WEBHOOK_SECRET` to the secret and to `secrets.txt`, then set
+`ELEVENLABS_WEBHOOK_SECRET` is in the secret and in `secrets.txt`; set
 `APP_ENVIRONMENT=production`. The app refuses to boot a production-like
 environment with unsafe settings; see `Settings._production_hardening`.
 `DRY_RUN=false` comes last, after vendor webhooks are configured and
