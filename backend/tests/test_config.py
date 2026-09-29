@@ -177,6 +177,32 @@ def test_temporal_tls_material_pairs_the_paths() -> None:
     assert settings.temporal_tls_material == ("/tmp/client.pem", "/tmp/client.key")
 
 
+def test_temporal_inline_tls_pair_must_be_complete() -> None:
+    with pytest.raises(ValidationError) as excinfo:
+        build_settings(temporal_tls_cert="-----BEGIN CERTIFICATE-----")
+    assert "TEMPORAL_TLS_CERT and TEMPORAL_TLS_KEY must be set together" in str(excinfo.value)
+
+
+def test_temporal_inline_and_path_tls_are_exclusive() -> None:
+    with pytest.raises(ValidationError) as excinfo:
+        build_settings(
+            temporal_tls_cert="cert",
+            temporal_tls_key="key",
+            temporal_client_cert_path="/tmp/client.pem",
+            temporal_client_key_path="/tmp/client.key",
+        )
+    assert "not both" in str(excinfo.value)
+
+
+def test_temporal_inline_tls_builds_config_from_pem_text() -> None:
+    from app.temporal.client import _tls
+
+    tls = _tls(build_settings(temporal_tls_cert="CERT", temporal_tls_key="KEY"))
+    assert tls is not None
+    assert tls.client_cert == b"CERT"
+    assert tls.client_private_key == b"KEY"
+
+
 def test_orchestrator_defaults_to_the_state_machine() -> None:
     """Adding Temporal configuration must not, by itself, switch engines."""
     assert build_settings().orchestrator == "state_machine"

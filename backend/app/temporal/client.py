@@ -32,10 +32,17 @@ logger = get_logger(__name__)
 def _tls(settings: Settings) -> TLSConfig | None:
     """mTLS material for Temporal Cloud, or ``None`` for a local server.
 
-    Both halves of the pair are validated at startup by
+    Inline PEM (environment variables, as ECS supplies secrets) or file paths.
+    Both halves of either pair are validated at startup by
     ``Settings._temporal_tls_material_present``, so by the time this runs a
     certificate without its key is already impossible.
     """
+    cert_pem = settings.temporal_tls_cert.get_secret_value()
+    if cert_pem:
+        return TLSConfig(
+            client_cert=cert_pem.encode(),
+            client_private_key=settings.temporal_tls_key.get_secret_value().encode(),
+        )
     material = settings.temporal_tls_material
     if material is None:
         return None
@@ -48,10 +55,13 @@ def _tls(settings: Settings) -> TLSConfig | None:
 
 async def connect(settings: Settings) -> Client:
     """A Temporal client for this process."""
+    api_key = settings.temporal_api_key.get_secret_value() or None
     client = await Client.connect(
         settings.temporal_address,
         namespace=settings.temporal_namespace,
-        tls=_tls(settings) or settings.temporal_tls_enabled,
+        # An API key is only ever sent over TLS.
+        tls=_tls(settings) or settings.temporal_tls_enabled or api_key is not None,
+        api_key=api_key,
     )
     logger.info(
         "connected to temporal",

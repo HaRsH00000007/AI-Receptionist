@@ -269,6 +269,14 @@ class Settings(BaseSettings):
     #: Temporal Cloud uses mTLS. Local dev uses neither.
     temporal_client_cert_path: str = ""
     temporal_client_key_path: str = ""
+    #: The same mTLS pair as PEM text rather than file paths. ECS injects
+    #: Secrets Manager values as environment variables and cannot mount them as
+    #: files, so this is the shape a container deployment supplies.
+    temporal_tls_cert: SecretStr = SecretStr("")
+    temporal_tls_key: SecretStr = SecretStr("")
+    #: Temporal Cloud API-key authentication, the alternative to mTLS. Always
+    #: sent over TLS.
+    temporal_api_key: SecretStr = SecretStr("")
 
     # ---- Object storage --------------------------------------------------
     # MinIO locally, S3 in AWS — the same S3 API behind one interface, so the
@@ -521,6 +529,15 @@ class Settings(BaseSettings):
         if bool(cert) != bool(key):
             raise ValueError(
                 "TEMPORAL_CLIENT_CERT_PATH and TEMPORAL_CLIENT_KEY_PATH must be set together"
+            )
+        inline_cert = not self._blank(self.temporal_tls_cert)
+        inline_key = not self._blank(self.temporal_tls_key)
+        if inline_cert != inline_key:
+            raise ValueError("TEMPORAL_TLS_CERT and TEMPORAL_TLS_KEY must be set together")
+        if inline_cert and cert:
+            raise ValueError(
+                "set the Temporal mTLS pair either inline (TEMPORAL_TLS_CERT/KEY) "
+                "or as paths (TEMPORAL_CLIENT_CERT_PATH/KEY_PATH), not both"
             )
         return self
 
