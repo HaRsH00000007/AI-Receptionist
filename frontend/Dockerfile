@@ -21,7 +21,9 @@ COPY . .
 ARG NEXT_PUBLIC_API_BASE_URL=http://localhost:8000
 ENV NEXT_PUBLIC_API_BASE_URL=$NEXT_PUBLIC_API_BASE_URL
 ENV NEXT_TELEMETRY_DISABLED=1
-RUN npm run build
+# The project has no public/ assets yet; the runtime stage copies the directory
+# unconditionally, so make sure it exists rather than fail the build.
+RUN mkdir -p public && npm run build
 
 FROM node:24-alpine AS runtime
 WORKDIR /app
