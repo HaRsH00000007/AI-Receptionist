@@ -582,6 +582,28 @@ async def test_openai_sends_an_unmasked_bearer_token() -> None:
     assert reply.text == "{}"
 
 
+async def test_openai_caps_output_with_max_completion_tokens() -> None:
+    """GPT-5-family models answer `max_tokens` with a 400; the cap must be renamed."""
+    recorder = Recorder([(200, {"choices": [{"message": {"content": "{}"}}], "model": "gpt"})])
+    provider = OpenAIProvider(build_settings(openai_api_key="sk-openai-test"))
+    provider._client = ProviderHTTPClient(
+        vendor="openai",
+        base_url="https://api.openai.com",
+        timeout_s=5,
+        headers={"authorization": "Bearer sk-openai-test"},
+        transport=recorder.transport(),
+    )
+    await provider.complete(
+        system="sys", user="usr", model="gpt-5.4-mini", max_tokens=321, temperature=0.0
+    )
+
+    body = recorder.body()
+    assert body["max_completion_tokens"] == 321
+    assert "max_tokens" not in body
+    assert body["temperature"] == 0.0
+    assert body["model"] == "gpt-5.4-mini"
+
+
 async def test_resend_posts_the_message() -> None:
     recorder = Recorder([(200, {"id": "re_123"})])
     settings = build_settings(resend_api_key="re-test")

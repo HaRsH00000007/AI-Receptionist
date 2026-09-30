@@ -107,17 +107,28 @@ def _chat_completion_text(payload: dict[str, Any] | None, *, vendor: str) -> str
 
 
 def _chat_completion_body(
-    *, system: str, user: str, model: str, max_tokens: int, temperature: float
+    *,
+    system: str,
+    user: str,
+    model: str,
+    max_tokens: int,
+    temperature: float,
+    token_limit_param: str = "max_tokens",
 ) -> dict[str, Any]:
     """The request body every OpenAI-compatible vendor accepts.
 
     ``response_format`` is what makes the caller's ``extract_json`` reliable
     rather than hopeful. It is requested, never trusted: the reply still goes
     through the same parse-and-validate path as any other provider's.
+
+    ``token_limit_param`` names the output cap. OpenAI's current models (the
+    GPT-5 family) reject ``max_tokens`` with a 400 and require
+    ``max_completion_tokens``, which every OpenAI chat model accepts; Groq's
+    compatible endpoint still takes ``max_tokens``.
     """
     return {
         "model": model,
-        "max_tokens": max_tokens,
+        token_limit_param: max_tokens,
         "temperature": temperature,
         "response_format": {"type": "json_object"},
         "messages": [
@@ -173,6 +184,7 @@ class OpenAIProvider:
                 model=model,
                 max_tokens=max_tokens,
                 temperature=temperature,
+                token_limit_param="max_completion_tokens",
             ),
         )
         return _chat_completion_response(payload, vendor=self.name, model=model)
