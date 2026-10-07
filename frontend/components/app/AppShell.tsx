@@ -303,7 +303,7 @@ function TopBar({ onOpenNav }: { onOpenNav: () => void }) {
 
         <div className="flex items-center gap-1">
           {data && <NotificationsMenu data={data} />}
-          <ThemeToggle className="hidden sm:inline-flex" />
+          <ThemeToggle />
           <Menu
             label="Account menu"
             triggerClassName="!px-1.5"

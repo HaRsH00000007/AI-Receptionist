@@ -10,6 +10,7 @@
 import Link from "next/link";
 import { useEffect, useState } from "react";
 
+import { ThemeToggle } from "@/app/ThemeToggle";
 import { Button, ButtonLink } from "@/components/ui/Button";
 import { cx } from "@/components/ui/cx";
 import { Dialog } from "@/components/ui/Dialog";
@@ -62,6 +63,7 @@ export function MarketingNav() {
         </ul>
 
         <div className="flex items-center gap-2">
+          <ThemeToggle className="text-ink-2" />
           <ButtonLink href="/login" variant="ghost" className="hidden text-ink-2 sm:inline-flex">
             Log in
           </ButtonLink>
