@@ -64,6 +64,10 @@ EXPECTED_TABLES = {
     "tenant_integrations",
     "sms_registrations",
     "onboarding_drafts",
+    # ---- website-based setup ----
+    "website_onboardings",
+    # ---- contacts ----
+    "contacts",
 }
 
 

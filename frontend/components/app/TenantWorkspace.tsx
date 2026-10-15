@@ -37,6 +37,7 @@ import {
   listCalls,
   logout,
 } from "@/lib/api";
+import { workableMemberships } from "@/lib/routing";
 import {
   isTerminal,
   type AgentView,
@@ -80,9 +81,13 @@ export const CALL_FETCH_LIMIT = 100;
 const WorkspaceContext = createContext<WorkspaceValue | null>(null);
 
 function initialTenant(session: SessionView): string {
-  const memberships = session.memberships;
-  const active = memberships.find((membership) => membership.tenant_id === session.active_tenant_id);
-  return active?.tenant_id ?? memberships[0]?.tenant_id ?? "";
+  // Prefer a business that is still somewhere to work, even when the session's
+  // remembered tenant is a cancelled one — otherwise the dashboard opens a
+  // deleted business and immediately has to route out of it.
+  const workable = workableMemberships(session.memberships);
+  const candidates = workable.length > 0 ? workable : session.memberships;
+  const active = candidates.find((membership) => membership.tenant_id === session.active_tenant_id);
+  return active?.tenant_id ?? candidates[0]?.tenant_id ?? "";
 }
 
 export function TenantWorkspace({
@@ -224,6 +229,19 @@ export function useCanManage(): boolean {
   const { session, tenantId } = useWorkspace();
   const role = session.memberships.find((entry) => entry.tenant_id === tenantId)?.role;
   return role === "owner" || role === "admin";
+}
+
+/**
+ * Whether the viewer owns this business.
+ *
+ * Narrower than {@link useCanManage} on purpose: an admin can change what the
+ * receptionist says, but ending the service — and releasing the phone number
+ * the business advertises — is the owner's decision. The API applies the same
+ * rule, so hiding the control is a courtesy, not the protection.
+ */
+export function useIsOwner(): boolean {
+  const { session, tenantId } = useWorkspace();
+  return session.memberships.find((entry) => entry.tenant_id === tenantId)?.role === "owner";
 }
 
 /**

@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import ForeignKey, Text
+from sqlalchemy import ForeignKey, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
@@ -66,5 +66,19 @@ class BusinessProfile(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     #: Bumped whenever the profile changes, so a cached config keyed by version
     #: becomes unreachable rather than stale.
     config_version: Mapped[int] = mapped_column(nullable=False, default=1)
+
+    # ---- website-learned material (null for a manually set-up business) ----
+    #: Knowledge items the customer kept from their website, each with its
+    #: source page. Feeds the v2 config prompt and survives a resync, so the
+    #: agent does not forget what the website taught it when it is republished.
+    knowledge_json: Mapped[list[dict[str, Any]] | None] = mapped_column(nullable=True)
+    #: What the receptionist should collect from callers, in order.
+    caller_questions_json: Mapped[list[dict[str, Any]] | None] = mapped_column(nullable=True)
+    #: Draft SMS bodies the agent may offer to send. Configuration only: there
+    #: is no sending path yet, and the UI says so rather than implying one.
+    sms_templates_json: Mapped[list[dict[str, Any]] | None] = mapped_column(nullable=True)
+    #: An explicit voice choice, overriding the greeting-style default in
+    #: ``select_voice_id``. Null means "whatever the style maps to".
+    voice_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     tenant: Mapped[Tenant] = relationship(back_populates="business_profile")

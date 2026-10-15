@@ -42,6 +42,12 @@ from app.services.call_processor import CallProcessor, claim_calls
 from app.services.notification_outbox import NotificationOutbox
 from app.services.retention import RetentionService
 from app.services.usage import rebuild_recent_rollups
+from app.services.website_onboarding import (
+    WebsiteOnboardingProcessor,
+)
+from app.services.website_onboarding import (
+    claim_jobs as claim_website_jobs,
+)
 
 logger = get_logger(__name__)
 
@@ -54,6 +60,7 @@ class WorkerStats:
     steps_executed: int = 0
     calls_processed: int = 0
     notifications_delivered: int = 0
+    websites_processed: int = 0
     maintenance_runs: int = 0
 
 
@@ -72,6 +79,7 @@ class Worker:
         self.engine = ProvisioningEngine(settings, providers)
         self.calls = CallProcessor(settings, providers)
         self.outbox = NotificationOutbox(settings)
+        self.websites = WebsiteOnboardingProcessor(settings, providers)
         # Epoch, so the first tick runs maintenance immediately rather than
         # waiting an interval after a deploy.
         self._last_maintenance = datetime.fromtimestamp(0, tz=UTC)
@@ -137,6 +145,21 @@ class Worker:
             async with self.session_factory() as session:
                 await self.outbox.deliver(session, notification_id, self.providers.email)
             self.stats.notifications_delivered += 1
+
+        # Website-based setup: read a customer's site and structure it. Claimed
+        # like everything else, and bounded by the crawler's own budgets — a
+        # slow site delays one customer's review screen, nothing else.
+        async with self.session_factory() as session:
+            website_ids = await claim_website_jobs(
+                session,
+                batch_size=self.settings.worker_batch_size,
+                lease_s=self.settings.provisioning_step_timeout_s,
+            )
+
+        for website_id in website_ids:
+            async with self.session_factory() as session:
+                await self.websites.process(session, website_id)
+            self.stats.websites_processed += 1
 
         await self._maintenance()
         return self.stats

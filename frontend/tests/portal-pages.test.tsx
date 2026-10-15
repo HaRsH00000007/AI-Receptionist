@@ -18,17 +18,24 @@ import { IntegrationsView } from "@/components/app/views/IntegrationsView";
 import { SmsView } from "@/components/app/views/SmsView";
 import { WorkspaceFrame } from "@/components/app/WorkspaceFrame";
 import { ToastProvider } from "@/components/ui/Toast";
-import type { IntegrationView, SessionView, SmsStateView } from "@/lib/types";
+import type {
+  ContactListView,
+  ContactView,
+  IntegrationView,
+  SessionView,
+  SmsStateView,
+} from "@/lib/types";
 
 const navigation = vi.hoisted(() => ({
   pathname: "/dashboard/integrations",
   search: "",
   replace: vi.fn(),
+  push: vi.fn(),
 }));
 
 vi.mock("next/navigation", () => ({
   usePathname: () => navigation.pathname,
-  useRouter: () => ({ push: vi.fn(), replace: navigation.replace, refresh: vi.fn() }),
+  useRouter: () => ({ push: navigation.push, replace: navigation.replace, refresh: vi.fn() }),
   useSearchParams: () => new URLSearchParams(navigation.search),
 }));
 
@@ -52,7 +59,13 @@ vi.mock("@/lib/api", async () => {
     submitSmsRegistration: vi.fn(),
     listConfigVersions: vi.fn(),
     updateAgentSettings: vi.fn(),
+    deleteReceptionist: vi.fn(),
     listContacts: vi.fn(),
+    createContact: vi.fn(),
+    updateContact: vi.fn(),
+    deleteContact: vi.fn(),
+    setContactBlocked: vi.fn(),
+    importContacts: vi.fn(),
     logout: vi.fn(),
   };
 });
@@ -65,12 +78,16 @@ const OWNER: SessionView = {
   full_name: "Dana Reyes",
   is_platform_admin: false,
   active_tenant_id: "t1",
-  memberships: [{ tenant_id: "t1", name: "Careful Legal", role: "owner" }],
+  memberships: [{ tenant_id: "t1", name: "Careful Legal", role: "owner", status: "active" }],
   impersonated: false,
 };
 const MEMBER: SessionView = {
   ...OWNER,
-  memberships: [{ tenant_id: "t1", name: "Careful Legal", role: "member" }],
+  memberships: [{ tenant_id: "t1", name: "Careful Legal", role: "member", status: "active" }],
+};
+const ADMIN: SessionView = {
+  ...OWNER,
+  memberships: [{ tenant_id: "t1", name: "Careful Legal", role: "admin", status: "active" }],
 };
 
 function integration(overrides: Partial<IntegrationView>): IntegrationView {
@@ -156,6 +173,7 @@ function givenLiveTenant() {
     area_code: "805",
     purchased_at: "2026-09-01T00:00:00Z",
     released_at: null,
+    can_release: true,
   });
   vi.mocked(api.getAgentOrNull).mockResolvedValue({
     elevenlabs_agent_id: "agent_1",
@@ -444,6 +462,136 @@ describe("Agent", () => {
     expect(screen.queryByRole("button", { name: /^edit$/i })).not.toBeInTheDocument();
     expect(screen.getByText(/only the account.s owners and admins/i)).toBeInTheDocument();
   });
+
+  // -------------------------------------------------------------------------
+  // Deleting the receptionist
+  // -------------------------------------------------------------------------
+
+  it("keeps the phone number unless the owner ticks the box", async () => {
+    vi.mocked(api.deleteReceptionist).mockResolvedValue({
+      complete: true,
+      tenant_status: "cancelled",
+      agent_deleted: true,
+      shared_agent_detached: false,
+      number_released: false,
+      number_retained: "+18055550100",
+      release_refused: null,
+      errors: [],
+    });
+    renderPage(<AgentView />);
+
+    fireEvent.click(await screen.findByRole("button", { name: /delete receptionist/i }));
+    const dialog = await screen.findByRole("dialog");
+    // The dialog names what is being deleted and the number at stake.
+    expect(within(dialog).getByText("Careful Legal")).toBeInTheDocument();
+    expect(within(dialog).getByText("+1 (805) 555-0100")).toBeInTheDocument();
+    expect(within(dialog).getByText(/no longer in service/i)).toBeInTheDocument();
+    expect(within(dialog).getByText(/rental continues/i)).toBeInTheDocument();
+
+    fireEvent.click(within(dialog).getByRole("button", { name: /delete receptionist/i }));
+
+    await waitFor(() => expect(api.deleteReceptionist).toHaveBeenCalledWith("t1", false));
+    expect(await screen.findByText("Your receptionist was deleted")).toBeInTheDocument();
+    // Onto the setup form, not the dead-end page for a cancelled business.
+    expect(navigation.push).toHaveBeenCalledWith("/get-started?another=1");
+  });
+
+  it("releases the number only when the box is ticked, after warning", async () => {
+    vi.mocked(api.deleteReceptionist).mockResolvedValue({
+      complete: true,
+      tenant_status: "cancelled",
+      agent_deleted: true,
+      shared_agent_detached: false,
+      number_released: true,
+      number_retained: null,
+      release_refused: null,
+      errors: [],
+    });
+    renderPage(<AgentView />);
+
+    fireEvent.click(await screen.findByRole("button", { name: /delete receptionist/i }));
+    const dialog = await screen.findByRole("dialog");
+    const release = within(dialog).getByRole("checkbox");
+    expect(within(dialog).getByText(/cannot be recovered/i)).toBeInTheDocument();
+    fireEvent.click(release);
+    fireEvent.click(within(dialog).getByRole("button", { name: /delete receptionist/i }));
+
+    await waitFor(() => expect(api.deleteReceptionist).toHaveBeenCalledWith("t1", true));
+    expect(await screen.findByText(/phone number has been released/i)).toBeInTheDocument();
+  });
+
+  it("does not offer to release a number we did not buy", async () => {
+    vi.mocked(api.getPhoneOrNull).mockResolvedValue({
+      e164: "+18055550100",
+      status: "active",
+      area_code: "805",
+      purchased_at: "2026-09-01T00:00:00Z",
+      released_at: null,
+      can_release: false,
+    });
+    renderPage(<AgentView />);
+
+    fireEvent.click(await screen.findByRole("button", { name: /delete receptionist/i }));
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).queryByRole("checkbox")).not.toBeInTheDocument();
+    expect(within(dialog).getByText(/not bought through us/i)).toBeInTheDocument();
+  });
+
+  it("does not claim success when vendor cleanup failed", async () => {
+    vi.mocked(api.deleteReceptionist).mockResolvedValue({
+      complete: false,
+      tenant_status: "cancelled",
+      agent_deleted: false,
+      shared_agent_detached: false,
+      number_released: false,
+      number_retained: "+18055550100",
+      release_refused: null,
+      errors: ["release_number: vendor_error"],
+    });
+    renderPage(<AgentView />);
+
+    fireEvent.click(await screen.findByRole("button", { name: /delete receptionist/i }));
+    fireEvent.click(
+      within(await screen.findByRole("dialog")).getByRole("button", {
+        name: /delete receptionist/i,
+      }),
+    );
+
+    expect(await screen.findByText("Cleanup unfinished")).toBeInTheDocument();
+    expect(screen.getByText(/could not be released/i)).toBeInTheDocument();
+    expect(screen.queryByText("Your receptionist was deleted")).not.toBeInTheDocument();
+    // Stays put: the number is still billing and the retry is on this page.
+    expect(navigation.push).not.toHaveBeenCalled();
+  });
+
+  it("sends one delete however often the button is clicked", async () => {
+    let resolve: (value: never) => void = () => {};
+    vi.mocked(api.deleteReceptionist).mockImplementation(
+      () => new Promise((settle) => {
+        resolve = settle as (value: never) => void;
+      }),
+    );
+    renderPage(<AgentView />);
+
+    fireEvent.click(await screen.findByRole("button", { name: /delete receptionist/i }));
+    const confirm = within(await screen.findByRole("dialog")).getByRole("button", {
+      name: /delete receptionist/i,
+    });
+    fireEvent.click(confirm);
+    fireEvent.click(confirm);
+    fireEvent.click(confirm);
+
+    expect(api.deleteReceptionist).toHaveBeenCalledTimes(1);
+    resolve(undefined as never);
+  });
+
+  it("offers deletion to the owner alone", async () => {
+    renderPage(<AgentView />, ADMIN);
+    expect(await screen.findByText("Version history")).toBeInTheDocument();
+    // An admin may edit the receptionist, but not end the service.
+    expect(screen.getByRole("button", { name: /^edit$/i })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /delete receptionist/i })).not.toBeInTheDocument();
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -451,38 +599,194 @@ describe("Agent", () => {
 // ---------------------------------------------------------------------------
 
 describe("Contacts", () => {
+  function contact(overrides: Partial<ContactView>): ContactView {
+    return {
+      id: "c1",
+      phone_e164: "+15551110001",
+      full_name: "Chris Patel",
+      note: "Wants a consultation",
+      status: "active",
+      source: "call",
+      created_at: "2026-09-01T10:00:00Z",
+      blocked_at: null,
+      call_count: 2,
+      first_call_at: "2026-09-01T10:00:00Z",
+      last_call_at: "2026-09-20T10:00:00Z",
+      ...overrides,
+    };
+  }
+
+  function page(contacts: ContactView[], counts: Partial<ContactListView> = {}): ContactListView {
+    return {
+      contacts,
+      total: contacts.length,
+      active_count: contacts.filter((entry) => entry.status === "active").length,
+      blocked_count: contacts.filter((entry) => entry.status === "blocked").length,
+      limit: 25,
+      offset: 0,
+      ...counts,
+    };
+  }
+
   beforeEach(() => {
     navigation.pathname = "/dashboard/contacts";
+    vi.mocked(api.createContact).mockResolvedValue(contact({}));
+    vi.mocked(api.updateContact).mockResolvedValue(contact({}));
+    vi.mocked(api.deleteContact).mockResolvedValue(undefined);
+    vi.mocked(api.setContactBlocked).mockResolvedValue(contact({ status: "blocked" }));
   });
 
   it("says so when nobody has called yet", async () => {
-    vi.mocked(api.listContacts).mockResolvedValue([]);
+    vi.mocked(api.listContacts).mockResolvedValue(page([]));
+
     renderPage(<ContactsView />);
+
     expect(await screen.findByText("No contacts yet")).toBeInTheDocument();
+    expect(
+      screen.getByText("Contacts captured from completed calls will appear here."),
+    ).toBeInTheDocument();
   });
 
-  it("opens a contact with their own call history", async () => {
-    vi.mocked(api.listContacts).mockResolvedValue([
-      {
-        phone_e164: "+15551110001",
-        name: "Chris",
-        call_count: 2,
-        first_call_at: "2026-09-01T10:00:00Z",
-        last_call_at: "2026-09-20T10:00:00Z",
-        last_summary: "Wants a consultation.",
-        last_intent: "booking_request",
-        has_urgent: false,
-      },
-    ]);
+  it("shows a contact with its note and call count", async () => {
+    vi.mocked(api.listContacts).mockResolvedValue(page([contact({})]));
+
     renderPage(<ContactsView />);
-    fireEvent.click(await screen.findByRole("button", { name: /view contact chris/i }));
+
+    expect(await screen.findByText("Chris Patel")).toBeInTheDocument();
+    expect(screen.getByText("+1 (555) 111-0001")).toBeInTheDocument();
+    expect(screen.getByText("Wants a consultation")).toBeInTheDocument();
+  });
+
+  it("calls a caller with no name an unknown caller, rather than guessing one", async () => {
+    vi.mocked(api.listContacts).mockResolvedValue(
+      page([contact({ full_name: null, note: null })]),
+    );
+
+    renderPage(<ContactsView />);
+
+    expect(await screen.findByText("Unknown caller")).toBeInTheDocument();
+  });
+
+  it("says so when contacts cannot be loaded, and offers a retry", async () => {
+    vi.mocked(api.listContacts).mockRejectedValue(new api.ApiError("down", { status: 0 }));
+
+    renderPage(<ContactsView />);
+
+    expect(await screen.findByText("Contacts couldn't be loaded")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /try again/i })).toBeInTheDocument();
+  });
+
+  it("adds a contact", async () => {
+    vi.mocked(api.listContacts).mockResolvedValue(page([]));
+    renderPage(<ContactsView />);
+
+    fireEvent.click(await screen.findByRole("button", { name: /add contact/i }));
     const dialog = await screen.findByRole("dialog");
-    expect(within(dialog).getByText(/as stated by the caller/i)).toBeInTheDocument();
+    fireEvent.change(within(dialog).getByLabelText(/phone number/i), {
+      target: { value: "(805) 555-0142" },
+    });
+    fireEvent.change(within(dialog).getByLabelText(/full name/i), {
+      target: { value: "Dana Rivera" },
+    });
+    fireEvent.click(within(dialog).getByRole("button", { name: /^add contact$/i }));
+
     await waitFor(() =>
-      expect(api.listCalls).toHaveBeenCalledWith("t1", undefined, {
-        limit: 50,
-        caller: "+15551110001",
+      expect(api.createContact).toHaveBeenCalledWith("t1", {
+        phone_number: "(805) 555-0142",
+        full_name: "Dana Rivera",
+        note: "",
       }),
     );
+  });
+
+  it("refuses to send an obviously invalid phone number", async () => {
+    vi.mocked(api.listContacts).mockResolvedValue(page([]));
+    renderPage(<ContactsView />);
+
+    fireEvent.click(await screen.findByRole("button", { name: /add contact/i }));
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.change(within(dialog).getByLabelText(/phone number/i), { target: { value: "123" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: /^add contact$/i }));
+
+    expect(await within(dialog).findByText(/10-digit US phone number/i)).toBeInTheDocument();
+    expect(api.createContact).not.toHaveBeenCalled();
+  });
+
+  it("removes a contact, and says the call history is kept", async () => {
+    vi.mocked(api.listContacts).mockResolvedValue(page([contact({})]));
+    renderPage(<ContactsView />);
+
+    fireEvent.click(await screen.findByRole("button", { name: /actions for chris patel/i }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: /remove/i }));
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByText(/transcripts and summaries are kept/i)).toBeInTheDocument();
+    fireEvent.click(within(dialog).getByRole("button", { name: /remove contact/i }));
+
+    await waitFor(() => expect(api.deleteContact).toHaveBeenCalledWith("t1", "c1"));
+  });
+
+  it("blocks a contact without implying their calls stop", async () => {
+    vi.mocked(api.listContacts).mockResolvedValue(page([contact({})]));
+    renderPage(<ContactsView />);
+
+    fireEvent.click(await screen.findByRole("button", { name: /actions for chris patel/i }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: /^block$/i }));
+
+    await waitFor(() => expect(api.setContactBlocked).toHaveBeenCalledWith("t1", "c1", true));
+    expect(await screen.findByText(/calls are still answered/i)).toBeInTheDocument();
+  });
+
+  it("switches to the blocked tab", async () => {
+    vi.mocked(api.listContacts).mockResolvedValue(
+      page([contact({})], { active_count: 1, blocked_count: 3 }),
+    );
+    renderPage(<ContactsView />);
+
+    fireEvent.click(await screen.findByRole("tab", { name: /blocked \(3\)/i }));
+
+    await waitFor(() =>
+      expect(api.listContacts).toHaveBeenCalledWith("t1", {
+        search: "",
+        status: "blocked",
+        limit: 25,
+        offset: 0,
+      }),
+    );
+  });
+
+  it("reports every row an import could not read", async () => {
+    vi.mocked(api.listContacts).mockResolvedValue(page([]));
+    vi.mocked(api.importContacts).mockResolvedValue({
+      imported: 2,
+      updated: 1,
+      skipped_duplicate: 1,
+      invalid: 2,
+      errors: [
+        { row: 4, reason: "phone number must have 10 digits" },
+        { row: 7, reason: "no phone number" },
+      ],
+    });
+    renderPage(<ContactsView />);
+
+    fireEvent.click(await screen.findByRole("button", { name: /import csv/i }));
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.change(within(dialog).getByLabelText(/csv file/i), {
+      target: { files: [new File(["name,phone"], "contacts.csv")] },
+    });
+    fireEvent.click(within(dialog).getByRole("button", { name: /^import$/i }));
+
+    expect(await screen.findByText("Import finished")).toBeInTheDocument();
+    expect(screen.getByText("Row 4")).toBeInTheDocument();
+    expect(screen.getByText("phone number must have 10 digits")).toBeInTheDocument();
+  });
+
+  it("offers no editing controls to a member", async () => {
+    vi.mocked(api.listContacts).mockResolvedValue(page([contact({})]));
+
+    renderPage(<ContactsView />, MEMBER);
+
+    expect(await screen.findByText("Chris Patel")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /add contact/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /import csv/i })).not.toBeInTheDocument();
   });
 });

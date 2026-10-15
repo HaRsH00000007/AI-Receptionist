@@ -24,11 +24,11 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from fastapi import APIRouter, Query
-from sqlalchemy import Float, and_, cast, distinct, func, select
+from sqlalchemy import Float, cast, distinct, func, select
 
-from app.api.auth_deps import RequireAdmin, RequireMember
-from app.api.deps import ProvidersDep, SettingsDep, TemporalClientDep
-from app.core.errors import ConflictError, NotFoundError
+from app.api.auth_deps import RequireAdmin, RequireMember, RequireOwner
+from app.api.deps import CacheDep, ProvidersDep, SettingsDep, TemporalClientDep
+from app.core.errors import AuthorizationError, ConflictError, NotFoundError
 from app.core.logging import get_logger
 from app.db.session import SessionDep
 from app.models import Call, ProvisioningRun, Tenant
@@ -38,8 +38,9 @@ from app.schemas.portal import (
     AgentUpdateResult,
     CallDetailView,
     ConfigVersionView,
-    ContactView,
     DashboardSummaryView,
+    DeletionResultView,
+    ReceptionistDeletion,
     RetryResult,
     TranscriptTurnView,
 )
@@ -48,6 +49,7 @@ from app.services.audit import Actor, AuditService
 from app.services.auth import Principal
 from app.services.config_versions import ConfigVersionService
 from app.services.provisioning_retry import reset_run_for_retry, restart_workflow
+from app.services.receptionist_deletion import ReceptionistDeletionService
 
 logger = get_logger(__name__)
 
@@ -206,86 +208,11 @@ def _transcript(document: dict[str, Any] | None) -> list[TranscriptTurnView]:
 # ---------------------------------------------------------------------------
 # Contacts
 # ---------------------------------------------------------------------------
-
-
-@router.get(
-    "/{tenant_id}/contacts",
-    response_model=list[ContactView],
-    summary="Callers, derived from call history",
-)
-async def list_contacts(
-    principal: RequireMember,
-    session: SessionDep,
-    limit: int = Query(default=100, ge=1, le=500),
-) -> list[ContactView]:
-    """Everyone who has called, most recent first.
-
-    Two queries rather than one clever one. The first aggregates per number; the
-    second picks each number's latest call (``DISTINCT ON``) for the name and
-    summary. Both are filtered by tenant, and the second only over the numbers
-    the first returned.
-    """
-    tenant_id = _tenant_of(principal)
-    started = func.coalesce(Call.started_at, Call.created_at)
-    scoped = and_(Call.tenant_id == tenant_id, Call.from_e164.is_not(None))
-
-    aggregates = (
-        await session.execute(
-            select(
-                Call.from_e164,
-                func.count(Call.id),
-                func.min(started),
-                func.max(started),
-                func.bool_or(func.coalesce(Call.urgency, 0) >= URGENT_AT),
-            )
-            .where(scoped)
-            .group_by(Call.from_e164)
-            .order_by(func.max(started).desc())
-            .limit(limit)
-        )
-    ).all()
-    if not aggregates:
-        return []
-
-    numbers = [row[0] for row in aggregates]
-    latest = {
-        row.from_e164: row
-        for row in (
-            await session.execute(
-                select(Call.from_e164, Call.summary, Call.intent)
-                .where(scoped, Call.from_e164.in_(numbers))
-                .order_by(Call.from_e164, started.desc())
-                .distinct(Call.from_e164)
-            )
-        ).all()
-    }
-    # The latest name *given*, which is not always on the latest call: a caller
-    # who said their name once and not the second time is still that person.
-    names = {
-        row.from_e164: row.caller_name
-        for row in (
-            await session.execute(
-                select(Call.from_e164, Call.caller_name)
-                .where(scoped, Call.from_e164.in_(numbers), Call.caller_name.is_not(None))
-                .order_by(Call.from_e164, started.desc())
-                .distinct(Call.from_e164)
-            )
-        ).all()
-    }
-
-    return [
-        ContactView(
-            phone_e164=number,
-            name=names.get(number),
-            call_count=count,
-            first_call_at=first,
-            last_call_at=last,
-            last_summary=latest[number].summary if number in latest else None,
-            last_intent=latest[number].intent if number in latest else None,
-            has_urgent=bool(urgent),
-        )
-        for number, count, first, last, urgent in aggregates
-    ]
+#
+# Moved to `app/api/v1/contacts.py`. Contacts used to be a read-only view over
+# the call history; they are now records a business can edit, block and import,
+# so they have their own module. Call statistics are still read from the calls
+# table there, which is why the two can never disagree.
 
 
 # ---------------------------------------------------------------------------
@@ -332,6 +259,58 @@ async def update_agent_settings(
         tenant=tenant,
         update=payload,
         actor=Actor(user=principal.user, actor_type=principal.actor_type),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Deleting the receptionist
+# ---------------------------------------------------------------------------
+
+
+@router.post(
+    "/{tenant_id}/receptionist/delete",
+    response_model=DeletionResultView,
+    summary="Delete this receptionist, optionally releasing its number",
+)
+async def delete_receptionist(
+    payload: ReceptionistDeletion,
+    principal: RequireOwner,
+    session: SessionDep,
+    settings: SettingsDep,
+    providers: ProvidersDep,
+    cache: CacheDep,
+) -> DeletionResultView:
+    """Owner only, and never while impersonating.
+
+    POST rather than DELETE because the request carries a decision — whether to
+    hand the phone number back — and that choice must not be guessable from the
+    method alone.
+
+    Idempotent: calling it again re-attempts only what failed, so a vendor
+    outage during the first call is recoverable without support. The work itself
+    is in :mod:`app.services.receptionist_deletion`, which stops the calls
+    before it touches a vendor.
+    """
+    if principal.is_impersonating:
+        # Releasing a customer's number and deleting their agent is their
+        # decision, not an operator's with their session borrowed.
+        raise AuthorizationError("a receptionist cannot be deleted while impersonating")
+
+    tenant = await _load_tenant(session, _tenant_of(principal))
+    outcome = await ReceptionistDeletionService(session, settings, providers, cache).delete(
+        tenant=tenant,
+        release_number=payload.release_number,
+        actor=Actor(user=principal.user, actor_type=principal.actor_type),
+    )
+    return DeletionResultView(
+        complete=outcome.complete,
+        tenant_status=outcome.tenant_status,
+        agent_deleted=outcome.agent_deleted,
+        shared_agent_detached=outcome.shared_agent_detached,
+        number_released=outcome.number_released,
+        number_retained=outcome.number_retained,
+        release_refused=outcome.release_refused,
+        errors=outcome.errors,
     )
 
 

@@ -46,3 +46,9 @@ postgres-data/
 infra/ecs/.rendered/
 # Personal overrides (e.g. EMAIL_FROM) that should not be in a public repo.
 infra/ecs/deploy.local.env
+
+# ---- Competitor reference captures ---------------------------------------
+# Screenshots of other products' UIs, kept locally while designing a flow.
+# They are someone else's branding and sometimes contain real people's names
+# and photos, so they never belong in this repository.
+flow/

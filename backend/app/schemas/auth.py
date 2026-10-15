@@ -11,7 +11,7 @@ import uuid
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, SecretStr
 
-from app.models.enums import MembershipRole
+from app.models.enums import MembershipRole, TenantStatus
 
 
 class MagicLinkRequest(BaseModel):
@@ -68,6 +68,11 @@ class TenantMembershipView(BaseModel):
     tenant_id: uuid.UUID
     name: str
     role: MembershipRole
+    #: The business's own state. Carried so the dashboard can tell a working
+    #: business from one that was cancelled: without it the organization
+    #: switcher lists every business the account has ever had, offers to open
+    #: a deleted one, and then bounces straight back out of it.
+    status: TenantStatus
 
 
 class SessionView(BaseModel):

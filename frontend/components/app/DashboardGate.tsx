@@ -20,7 +20,7 @@ import { Button } from "@/components/ui/Button";
 import { LogoMark } from "@/components/ui/Logo";
 import { Spinner } from "@/components/ui/Spinner";
 import { ApiError, getSessionOrNull } from "@/lib/api";
-import { ONBOARDING_PATH } from "@/lib/routing";
+import { ONBOARDING_PATH, workableMemberships } from "@/lib/routing";
 import type { SessionView } from "@/lib/types";
 
 import { TenantWorkspace } from "./TenantWorkspace";
@@ -58,8 +58,11 @@ export function DashboardGate({ children }: { children: ReactNode }) {
   }, [attempt]);
 
   // No business yet means onboarding is unfinished: resume the setup form,
-  // which reopens the saved draft.
-  const needsOnboarding = state.status === "signed_in" && state.session.memberships.length === 0;
+  // which reopens the saved draft. An account whose businesses are all
+  // cancelled counts as having none — there is nothing for it to open.
+  const needsOnboarding =
+    state.status === "signed_in" &&
+    workableMemberships(state.session.memberships).length === 0;
 
   useEffect(() => {
     if (state.status === "signed_out") router.replace("/login");

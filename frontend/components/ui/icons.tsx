@@ -364,6 +364,16 @@ export const ServerIcon = (props: IconProps) => (
     <path d="M6 7h.01M6 17h.01" />
   </Svg>
 );
+export const DownloadIcon = (props: IconProps) => (
+  <Svg {...props}>
+    <path d="M12 3v12M7 11l5 5 5-5M4 20h16" />
+  </Svg>
+);
+export const UploadIcon = (props: IconProps) => (
+  <Svg {...props}>
+    <path d="M12 16V4M7 8l5-5 5 5M4 20h16" />
+  </Svg>
+);
 export const PlusIcon = (props: IconProps) => (
   <Svg {...props}>
     <path d="M12 5v14M5 12h14" />

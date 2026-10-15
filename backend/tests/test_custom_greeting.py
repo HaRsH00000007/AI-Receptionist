@@ -65,6 +65,10 @@ def _profile(greeting_custom: str | None = None) -> Any:
         greeting_custom=greeting_custom,
         escalation_raw=None,
         escalation_json=None,
+        # A form-only business: no website knowledge, so the generator stays on
+        # the v1 prompt. Present on the double because the real column is.
+        knowledge_json=None,
+        caller_questions_json=None,
     )
 
 

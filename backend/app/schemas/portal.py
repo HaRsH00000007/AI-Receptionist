@@ -188,6 +188,44 @@ class RetryResult(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Deleting the receptionist
+# ---------------------------------------------------------------------------
+
+
+class ReceptionistDeletion(BaseModel):
+    """The owner's delete request.
+
+    ``release_number`` defaults to false, which is the recoverable choice: the
+    receptionist stops answering and the number stays in the account. Releasing
+    is the irreversible one, so it has to be asked for.
+    """
+
+    release_number: bool = False
+
+
+class DeletionResultView(BaseModel):
+    """What the delete managed to do, honestly.
+
+    ``complete`` is false when a vendor call failed. The receptionist has still
+    stopped answering — that happens first and never depends on a vendor — but
+    something is left to clean up, and repeating the request finishes it.
+    """
+
+    complete: bool
+    tenant_status: str
+    agent_deleted: bool
+    shared_agent_detached: bool
+    number_released: bool
+    #: Kept, and still billing, in E.164.
+    number_retained: str | None
+    #: Set when a release was asked for and refused, as a stable code.
+    release_refused: str | None
+    #: Vendor failure codes such as ``release_number: vendor_error``. Never a
+    #: provider payload: those carry account identifiers and request detail.
+    errors: list[str]
+
+
+# ---------------------------------------------------------------------------
 # Integrations
 # ---------------------------------------------------------------------------
 

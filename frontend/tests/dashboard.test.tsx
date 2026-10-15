@@ -52,7 +52,7 @@ const SESSION: SessionView = {
   full_name: "Dana Reyes",
   is_platform_admin: false,
   active_tenant_id: "t1",
-  memberships: [{ tenant_id: "t1", name: "Sunset Salon", role: "owner" }],
+  memberships: [{ tenant_id: "t1", name: "Sunset Salon", role: "owner", status: "active" }],
   impersonated: false,
 };
 
@@ -105,6 +105,7 @@ function givenHealthyTenant(usage: Record<string, unknown> = {}, calls: CallView
     area_code: "805",
     purchased_at: "2026-09-01T00:00:00Z",
     released_at: null,
+    can_release: true,
   });
   vi.mocked(api.getAgentOrNull).mockResolvedValue({
     elevenlabs_agent_id: "agent_1",
@@ -292,8 +293,8 @@ describe("the dashboard", () => {
     renderDashboard({
       ...SESSION,
       memberships: [
-        { tenant_id: "t1", name: "Sunset Salon", role: "owner" },
-        { tenant_id: "t2", name: "Careful Legal", role: "member" },
+        { tenant_id: "t1", name: "Sunset Salon", role: "owner", status: "active" },
+        { tenant_id: "t2", name: "Careful Legal", role: "member", status: "active" },
       ],
     });
 

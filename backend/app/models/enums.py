@@ -452,6 +452,13 @@ class AuditAction(StrEnum):
 
     AGENT_CREATED = "agent_created"
     AGENT_RESYNCED = "agent_resynced"
+    RECEPTIONIST_DELETED = "receptionist_deleted"
+    CONTACT_CREATED = "contact_created"
+    CONTACT_UPDATED = "contact_updated"
+    CONTACT_DELETED = "contact_deleted"
+    CONTACT_BLOCKED = "contact_blocked"
+    CONTACT_UNBLOCKED = "contact_unblocked"
+    CONTACTS_IMPORTED = "contacts_imported"
 
     PROVISIONING_STARTED = "provisioning_started"
     PROVISIONING_RETRIED = "provisioning_retried"
@@ -554,6 +561,63 @@ class IntegrationStatus(StrEnum):
 # ---------------------------------------------------------------------------
 # SMS compliance
 # ---------------------------------------------------------------------------
+
+
+class ContactStatus(StrEnum):
+    """Whether a contact is someone the business still wants to hear from."""
+
+    ACTIVE = "active"
+    #: The business does not want this caller. What blocking *does* is a
+    #: product decision, not an implied one: today it marks the record and
+    #: filters the list. It does not drop calls, because silently hanging up on
+    #: a caller is a thing a business should opt into explicitly.
+    BLOCKED = "blocked"
+
+
+class ContactSource(StrEnum):
+    """Where a contact came from, which decides what may be overwritten.
+
+    A name a person typed is never replaced by a name a caller claimed on the
+    phone; the reverse is allowed.
+    """
+
+    MANUAL = "manual"
+    CALL = "call"
+    IMPORT = "import"
+
+
+class WebsiteOnboardingStatus(StrEnum):
+    """Where a website-based setup has got to.
+
+    A crawl and an LLM call are slow and can fail, so this is a job status, not
+    a form state: the customer can close the tab and come back to it.
+
+    ``READY`` means there is knowledge to review — never that a receptionist
+    exists. Nothing is provisioned, bought or created at a vendor until the
+    customer confirms, which moves the job to ``CONFIRMED``.
+    """
+
+    #: Queued. The worker has not picked it up yet.
+    PENDING = "pending"
+    #: Reading the website.
+    CRAWLING = "crawling"
+    #: Crawled; asking the LLM to structure what was found.
+    GENERATING = "generating"
+    #: There is a draft to review and edit.
+    READY = "ready"
+    #: The crawl or the generation failed. Retryable by the customer.
+    FAILED = "failed"
+    #: The customer confirmed and a business was created from this draft.
+    CONFIRMED = "confirmed"
+
+
+#: Statuses the worker should pick up. ``READY``, ``FAILED`` and ``CONFIRMED``
+#: are all waiting on a person, not on us.
+WEBSITE_ONBOARDING_CLAIMABLE = (
+    WebsiteOnboardingStatus.PENDING,
+    WebsiteOnboardingStatus.CRAWLING,
+    WebsiteOnboardingStatus.GENERATING,
+)
 
 
 class SmsRegistrationStatus(StrEnum):

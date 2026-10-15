@@ -211,6 +211,7 @@ async def get_phone(tenant_id: TenantReadDep, session: SessionDep) -> PhoneNumbe
         area_code=number.area_code,
         purchased_at=number.purchased_at,
         released_at=number.released_at,
+        can_release=bool(number.twilio_sid),
     )
 
 

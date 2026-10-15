@@ -25,7 +25,11 @@ from app.core.logging import get_logger
 from app.models import Agent, AgentConfig, BusinessProfile, Tenant
 from app.models.identity import User
 from app.providers.protocols import ElevenLabsProvider, LLMProvider
-from app.services.config_generator import ConfigGenerator, GenerationOutcome
+from app.services.config_generator import (
+    ConfigGenerator,
+    GenerationOutcome,
+    enabled_question_labels,
+)
 from app.services.config_versions import ConfigVersionService, PublishedConfig
 from app.services.idempotency import tenant_resource_name
 from app.services.prompt_renderer import (
@@ -65,8 +69,15 @@ async def generate_and_publish(
         business_name=tenant.name,
         business_type=tenant.business_type.value,
         config=outcome.config,
+        collect=enabled_question_labels(profile.caller_questions_json),
     )
+    # An explicit choice wins over the greeting-style default. Validated where
+    # it is saved, and re-checked here: a voice id that is no longer in the
+    # configured map would be a 422 from the vendor on every publish, so an
+    # unknown one falls back rather than breaking the agent.
     voice_id = select_voice_id(settings, profile.greeting_style)
+    if profile.voice_id and profile.voice_id in settings.voice_map.values():
+        voice_id = profile.voice_id
 
     published = await ConfigVersionService(session).publish(
         tenant_id=tenant.id,

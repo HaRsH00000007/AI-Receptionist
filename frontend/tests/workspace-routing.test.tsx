@@ -50,6 +50,8 @@ vi.mock("@/lib/api", async () => {
     getSessionOrNull: vi.fn(),
     getOnboardingDraft: vi.fn(),
     saveOnboardingDraft: vi.fn(),
+    getWebsiteSetupOrNull: vi.fn(),
+    startWebsiteSetup: vi.fn(),
     registerAccount: vi.fn(),
     logout: vi.fn(),
   };
@@ -63,7 +65,7 @@ const OWNER: SessionView = {
   full_name: "Dana Reyes",
   is_platform_admin: false,
   active_tenant_id: "t1",
-  memberships: [{ tenant_id: "t1", name: "Sunset Salon", role: "owner" }],
+  memberships: [{ tenant_id: "t1", name: "Sunset Salon", role: "owner", status: "active" }],
   impersonated: false,
 };
 
@@ -111,6 +113,21 @@ function givenTenant(tenantStatus: string, provisioning: ProvisioningStatus) {
   });
   vi.mocked(api.listCalls).mockResolvedValue([]);
   vi.mocked(api.getProfileOrNull).mockResolvedValue(null);
+}
+
+/** Status per tenant id, so a two-business account can differ per business. */
+function givenTenants(statuses: Record<string, string>) {
+  vi.mocked(api.getTenant).mockImplementation(async (id: string) => ({
+    id,
+    name: id === "t2" ? "Sunset Spa" : "Sunset Salon",
+    business_type: "salon",
+    status: statuses[id] ?? "active",
+    plan: "starter",
+    timezone: "America/Los_Angeles",
+    contact_email: "owner@sunset.example",
+    area_code: "805",
+    created_at: "2026-09-01T00:00:00Z",
+  }));
 }
 
 function renderWorkspace(children = <p>page content</p>, session: SessionView = OWNER) {
@@ -191,11 +208,80 @@ describe("a customer whose setup failed", () => {
     navigation.pathname = "/dashboard/setup";
     renderWorkspace(<SetupView />, {
       ...OWNER,
-      memberships: [{ tenant_id: "t1", name: "Sunset Salon", role: "member" }],
+      memberships: [{ tenant_id: "t1", name: "Sunset Salon", role: "member", status: "active" }],
     });
     await screen.findByRole("heading", { name: /setup needs attention/i });
     expect(screen.queryByRole("button", { name: /try again/i })).not.toBeInTheDocument();
     expect(screen.getByText(/ask the owner of this account/i)).toBeInTheDocument();
+  });
+});
+
+describe("someone who deleted their receptionist", () => {
+  it("is taken to set up a new one when they sign in again", async () => {
+    // The bug this covers: signing in landed on "This receptionist isn't
+    // active" — a page whose only action is the one we now go to directly.
+    givenTenant("cancelled", "active");
+
+    renderWorkspace();
+
+    await waitFor(() =>
+      expect(navigation.replace).toHaveBeenCalledWith("/get-started?another=1"),
+    );
+    expect(screen.queryByText("page content")).not.toBeInTheDocument();
+    expect(screen.queryByText(/isn't active/i)).not.toBeInTheDocument();
+  });
+
+  it("does not ping-pong when every business they own is cancelled", async () => {
+    // The regression: each cancelled business said "you own another, open that"
+    // about the other, so the org switcher flipped between them forever and
+    // every hop refetched seven endpoints. One pass, then the form.
+    givenTenant("cancelled", "active");
+    givenTenants({ t1: "cancelled", t2: "cancelled" });
+    const bothDead: SessionView = {
+      ...OWNER,
+      memberships: [
+        { tenant_id: "t1", name: "Roman Wellness Spa", role: "owner", status: "active" },
+        { tenant_id: "t2", name: "Scalezix", role: "owner", status: "active" },
+      ],
+    };
+
+    renderWorkspace(<p>page content</p>, bothDead);
+
+    await waitFor(() =>
+      expect(navigation.replace).toHaveBeenCalledWith("/get-started?another=1"),
+    );
+    // Each business is opened at most once: two tenants, two loads, no loop.
+    // The property that matters: the search moves forward and stops. Once it
+    // has moved on to the second business it never goes back to the first,
+    // which is what the ping-pong did — forever, seven requests a lap.
+    const opened = vi.mocked(api.getTenant).mock.calls.map(([id]) => id);
+    expect(opened).toContain("t2");
+    expect(opened.lastIndexOf("t1")).toBeLessThan(opened.indexOf("t2"));
+    // Bounded: each business is visited once (the workspace loads each one
+    // twice by itself), not endlessly. A ping-pong has no upper bound at all.
+    expect(opened.length).toBeLessThanOrEqual(4);
+  });
+
+  it("opens their other business instead, when they still have one", async () => {
+    // Two businesses, the open one cancelled: switching beats offering to
+    // create a third.
+    givenTenant("cancelled", "active");
+    givenTenants({ t1: "cancelled", t2: "active" });
+    const twoBusinesses: SessionView = {
+      ...OWNER,
+      memberships: [
+        { tenant_id: "t1", name: "Sunset Salon", role: "owner", status: "active" },
+        { tenant_id: "t2", name: "Sunset Spa", role: "owner", status: "active" },
+      ],
+    };
+
+    renderWorkspace(<p>page content</p>, twoBusinesses);
+
+    await waitFor(() =>
+      expect(vi.mocked(api.getTenant).mock.calls.some(([id]) => id === "t2")).toBe(true),
+    );
+    // It opens the live business and stays there: no offer to create a third.
+    expect(navigation.replace).not.toHaveBeenCalledWith("/get-started?another=1");
   });
 });
 
@@ -215,6 +301,7 @@ describe("the Get started page", () => {
   });
 
   it("shows a new account the business form, resumed from its saved draft", async () => {
+    navigation.search = "mode=manual";
     vi.mocked(api.getSessionOrNull).mockResolvedValue({ ...OWNER, memberships: [] });
     vi.mocked(api.getOnboardingDraft).mockResolvedValue({
       data: { step: 0, values: { business_name: "Sunset Salon" } },
@@ -229,6 +316,7 @@ describe("the Get started page", () => {
   });
 
   it("still shows the form if the saved draft can't be read", async () => {
+    navigation.search = "mode=manual";
     vi.mocked(api.getSessionOrNull).mockResolvedValue({ ...OWNER, memberships: [] });
     vi.mocked(api.getOnboardingDraft).mockRejectedValue(new api.ApiError("down", { status: 0 }));
     vi.mocked(api.saveOnboardingDraft).mockResolvedValue({ data: null, updated_at: null });
@@ -239,9 +327,123 @@ describe("the Get started page", () => {
   it("lets a customer deliberately start another business", async () => {
     vi.mocked(api.getSessionOrNull).mockResolvedValue(OWNER);
     vi.mocked(api.getOnboardingDraft).mockResolvedValue({ data: null, updated_at: null });
-    navigation.search = "another=1";
+    navigation.search = "another=1&mode=manual";
     render(<GetStartedGate />);
     expect(await screen.findByLabelText("Business name")).toBeInTheDocument();
+  });
+
+  it("offers both ways to set up before either one starts", async () => {
+    vi.mocked(api.getSessionOrNull).mockResolvedValue({ ...OWNER, memberships: [] });
+    vi.mocked(api.getOnboardingDraft).mockResolvedValue({ data: null, updated_at: null });
+
+    render(<GetStartedGate />);
+
+    expect(
+      await screen.findByRole("heading", { name: /how would you like to create/i }),
+    ).toBeInTheDocument();
+    // Neither flow has started: no form, and nothing has been sent anywhere.
+    expect(screen.queryByLabelText("Business name")).not.toBeInTheDocument();
+    expect(api.startWebsiteSetup).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: /use my website/i }));
+
+    // The choice is recorded in the URL, so a refresh stays on it.
+    await waitFor(() =>
+      expect(navigation.replace).toHaveBeenCalledWith("/get-started?mode=website"),
+    );
+  });
+
+  it("does not reopen a website setup that already built a business", async () => {
+    // The bug: after deleting the receptionist, signing in reopened step 4 of
+    // the wizard — the review screen of a business that no longer exists.
+    vi.mocked(api.getSessionOrNull).mockResolvedValue({ ...OWNER, memberships: [] });
+    vi.mocked(api.getOnboardingDraft).mockResolvedValue({ data: null, updated_at: null });
+    vi.mocked(api.getWebsiteSetupOrNull).mockResolvedValue({
+      id: "job-1",
+      status: "confirmed",
+      website_url: "https://sunset.example.com/",
+      attempt: 1,
+      last_error: null,
+      ready: true,
+      tenant_id: "t9",
+      crawl: null,
+      knowledge: {
+        business_name: "Sunset Salon",
+        business_summary: "A salon.",
+        operating_hours: "Tue-Sat 9-6",
+        services: ["Cuts"],
+        items: [],
+        questions: [],
+        sms_templates: [],
+      },
+      choices: null,
+      created_at: "2026-10-13T00:00:00Z",
+      updated_at: "2026-10-13T00:00:00Z",
+    });
+
+    render(<GetStartedGate />);
+
+    // Back to the start, with both options offered.
+    expect(
+      await screen.findByRole("heading", { name: /how would you like to create/i }),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: /what your agent learned/i })).not.toBeInTheDocument();
+  });
+
+  it("resumes a half-finished website setup without asking again", async () => {
+    vi.mocked(api.getSessionOrNull).mockResolvedValue({ ...OWNER, memberships: [] });
+    vi.mocked(api.getOnboardingDraft).mockResolvedValue({ data: null, updated_at: null });
+    vi.mocked(api.getWebsiteSetupOrNull).mockResolvedValue({
+      id: "job-1",
+      status: "ready",
+      website_url: "https://sunset.example.com/",
+      attempt: 1,
+      last_error: null,
+      ready: true,
+      tenant_id: null,
+      crawl: {
+        site: "https://sunset.example.com/",
+        pages_read: 3,
+        page_urls: ["https://sunset.example.com/"],
+        skipped: 0,
+        failed: 0,
+        duplicates: 0,
+        robots_blocked: 0,
+        truncated: false,
+        reasons: {},
+      },
+      knowledge: {
+        business_name: "Sunset Salon",
+        business_summary: "A salon.",
+        operating_hours: "Tue-Sat 9-6",
+        services: ["Cuts"],
+        items: [
+          {
+            id: "item-0",
+            category: "pricing",
+            title: "Prices",
+            content: "A cut is thirty dollars.",
+            source_url: "https://sunset.example.com/",
+            needs_review: false,
+            enabled: true,
+          },
+        ],
+        questions: [],
+        sms_templates: [],
+      },
+      choices: null,
+      created_at: "2026-10-13T00:00:00Z",
+      updated_at: "2026-10-13T00:00:00Z",
+    });
+
+    render(<GetStartedGate />);
+
+    // Straight back to the review screen, not the choice screen.
+    expect(
+      await screen.findByRole("heading", { name: /what your agent learned/i }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Prices")).toBeInTheDocument();
+    expect(screen.getByText(/read 3 pages/i)).toBeInTheDocument();
   });
 });
 
@@ -319,5 +521,165 @@ describe("creating an account", () => {
     vi.mocked(api.getSessionOrNull).mockResolvedValue(OWNER);
     render(<SignupForm />);
     await waitFor(() => expect(navigation.replace).toHaveBeenCalledWith("/get-started"));
+  });
+});
+
+describe("getting back out of the website flow", () => {
+  function givenNoDraft() {
+    vi.mocked(api.getSessionOrNull).mockResolvedValue({ ...OWNER, memberships: [] });
+    vi.mocked(api.getOnboardingDraft).mockResolvedValue({ data: null, updated_at: null });
+    vi.mocked(api.getWebsiteSetupOrNull).mockResolvedValue(null);
+  }
+
+  it("goes back from the first step to the choice of both ways", async () => {
+    // Without this, picking "use my website" was a one-way door: the first
+    // step had no Back at all.
+    navigation.search = "mode=website";
+    givenNoDraft();
+
+    render(<GetStartedGate />);
+    fireEvent.click(await screen.findByRole("button", { name: /back/i }));
+
+    await waitFor(() => expect(navigation.replace).toHaveBeenCalledWith("/get-started"));
+  });
+
+  it("offers a way out while the website is being read", async () => {
+    // The reading screen used to render no footer, so a customer who had
+    // mistyped their address could only wait.
+    navigation.search = "mode=website";
+    givenNoDraft();
+    vi.mocked(api.getWebsiteSetupOrNull).mockResolvedValue({
+      id: "job-1",
+      status: "crawling",
+      website_url: "https://sunset.example.com/",
+      attempt: 1,
+      last_error: null,
+      ready: false,
+      tenant_id: null,
+      crawl: null,
+      knowledge: null,
+      choices: null,
+      created_at: "2026-10-13T00:00:00Z",
+      updated_at: "2026-10-13T00:00:00Z",
+    });
+
+    render(<GetStartedGate />);
+
+    expect(await screen.findByText(/reading your website/i)).toBeInTheDocument();
+    const back = screen.getByRole("button", { name: /back/i });
+    expect(back).toBeInTheDocument();
+    // No Next: the screen advances by itself when the crawl finishes.
+    expect(screen.queryByRole("button", { name: /^next$/i })).not.toBeInTheDocument();
+
+    fireEvent.click(back);
+    expect(await screen.findByLabelText("Your website")).toBeInTheDocument();
+  });
+
+  it("goes back from the review to the website field, not to the reading screen", async () => {
+    // Back used to be `step - 1`, which landed on a progress screen with
+    // nothing left to report — and no footer to escape it.
+    navigation.search = "mode=website";
+    givenNoDraft();
+    vi.mocked(api.getWebsiteSetupOrNull).mockResolvedValue({
+      id: "job-1",
+      status: "ready",
+      website_url: "https://sunset.example.com/",
+      attempt: 1,
+      last_error: null,
+      ready: true,
+      tenant_id: null,
+      crawl: {
+        site: "https://sunset.example.com/",
+        pages_read: 3,
+        page_urls: [],
+        skipped: 0,
+        failed: 0,
+        duplicates: 0,
+        robots_blocked: 0,
+        truncated: false,
+        reasons: {},
+      },
+      knowledge: {
+        business_name: "Sunset Salon",
+        business_summary: "A salon.",
+        operating_hours: "Tue-Sat 9-6",
+        services: ["Cuts"],
+        items: [],
+        questions: [],
+        sms_templates: [],
+      },
+      choices: null,
+      created_at: "2026-10-13T00:00:00Z",
+      updated_at: "2026-10-13T00:00:00Z",
+    });
+
+    render(<GetStartedGate />);
+    expect(await screen.findByRole("heading", { name: /what your agent learned/i })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /back/i }));
+
+    expect(await screen.findByLabelText("Your website")).toBeInTheDocument();
+    expect(screen.queryByText(/reading your website/i)).not.toBeInTheDocument();
+  });
+});
+
+describe("the organization switcher", () => {
+  it("lists only businesses that are still somewhere to work", async () => {
+    // The bug: an account that had deleted two receptionists saw all three in
+    // the dropdown, and picking a dead one bounced straight back out again.
+    givenTenants({ t1: "cancelled", t2: "cancelled", t3: "active" });
+    vi.mocked(api.getProvisioning).mockResolvedValue({
+      run_id: "r1",
+      tenant_id: "t3",
+      status: "active",
+      current_step: null,
+      attempt: 1,
+      last_error: null,
+      correlation_id: "corr-1",
+      next_attempt_at: null,
+      started_at: null,
+      finished_at: null,
+      steps: [],
+      completed_steps: 8,
+      total_steps: 8,
+      billing: null,
+    });
+    const threeBusinesses: SessionView = {
+      ...OWNER,
+      active_tenant_id: "t3",
+      memberships: [
+        { tenant_id: "t1", name: "Roman Wellness Spa", role: "owner", status: "cancelled" },
+        { tenant_id: "t2", name: "Scalezix", role: "owner", status: "cancelled" },
+        { tenant_id: "t3", name: "Glocal Studio", role: "owner", status: "active" },
+      ],
+    };
+
+    renderWorkspace(<p>page content</p>, threeBusinesses);
+
+    expect(await screen.findByText("page content")).toBeInTheDocument();
+    // One live business, so no switcher at all — just the business card.
+    expect(screen.queryByLabelText("Organization")).not.toBeInTheDocument();
+    expect(screen.queryByText("Roman Wellness Spa")).not.toBeInTheDocument();
+    expect(screen.queryByText("Scalezix")).not.toBeInTheDocument();
+    expect(screen.getAllByText("Glocal Studio").length).toBeGreaterThan(0);
+  });
+
+  it("opens the live business even when the session remembers a deleted one", async () => {
+    givenTenants({ t1: "cancelled", t3: "active" });
+    const staleActive: SessionView = {
+      ...OWNER,
+      active_tenant_id: "t1",
+      memberships: [
+        { tenant_id: "t1", name: "Scalezix", role: "owner", status: "cancelled" },
+        { tenant_id: "t3", name: "Glocal Studio", role: "owner", status: "active" },
+      ],
+    };
+
+    renderWorkspace(<p>page content</p>, staleActive);
+
+    await waitFor(() =>
+      expect(vi.mocked(api.getTenant).mock.calls.map(([id]) => id)).toContain("t3"),
+    );
+    expect(vi.mocked(api.getTenant).mock.calls.map(([id]) => id)).not.toContain("t1");
   });
 });

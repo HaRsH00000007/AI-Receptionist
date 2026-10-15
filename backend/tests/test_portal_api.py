@@ -200,49 +200,10 @@ async def test_calls_can_be_filtered_to_one_caller(
 # ---------------------------------------------------------------------------
 
 
-async def test_contacts_are_derived_from_calls(api_client: AsyncClient, api_app: FastAPI) -> None:
-    owner = await sign_up(api_client)
-    now = datetime.now(UTC)
-    await _add_calls(
-        api_app,
-        owner.tenant_id,
-        [
-            # Dana: gave a name on the first call, not the second.
-            {
-                "from_e164": "+15551110001",
-                "caller_name": "Dana",
-                "started_at": now - timedelta(days=3),
-                "summary": "First visit",
-                "urgency": 4,
-            },
-            {
-                "from_e164": "+15551110001",
-                "started_at": now - timedelta(hours=1),
-                "summary": "Rebooking",
-                "intent": "booking",
-            },
-            {"from_e164": "+15551110002", "started_at": now - timedelta(days=1)},
-            # No caller id: not a contact.
-            {"from_e164": None, "started_at": now},
-        ],
-    )
-    other_id, _ = await other_tenant(api_app)
-    await _add_calls(api_app, other_id, [{"from_e164": "+15559990000"}])
-
-    response = await api_client.get(
-        f"/api/v1/tenants/{owner.tenant_id}/contacts", headers=owner.headers
-    )
-    assert response.status_code == 200
-    contacts = response.json()
-    assert [contact["phone_e164"] for contact in contacts] == ["+15551110001", "+15551110002"]
-    dana = contacts[0]
-    assert dana["name"] == "Dana"  # the latest name given, not the latest call's
-    assert dana["call_count"] == 2
-    assert dana["last_summary"] == "Rebooking"
-    assert dana["last_intent"] == "booking"
-    assert dana["has_urgent"] is True
-    assert contacts[1]["name"] is None
-    assert contacts[1]["has_urgent"] is False
+# `test_contacts_are_derived_from_calls` lived here. Contacts are records now,
+# not a view over the call history, so its coverage moved to tests/test_contacts.py
+# — including the case it was the only test for: a call with no caller id never
+# becomes a contact. The membership check below still applies to the new endpoint.
 
 
 async def test_contacts_are_membership_only(api_client: AsyncClient, api_app: FastAPI) -> None:

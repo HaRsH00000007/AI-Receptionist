@@ -14,38 +14,68 @@
  */
 
 import { usePathname, useRouter } from "next/navigation";
-import { useEffect, type ReactNode } from "react";
+import { useEffect, useRef, type ReactNode } from "react";
 
 import { ThemeToggle } from "@/app/ThemeToggle";
 import { Button } from "@/components/ui/Button";
 import { LogOutIcon } from "@/components/ui/icons";
 import { Logo } from "@/components/ui/Logo";
 import { Spinner } from "@/components/ui/Spinner";
-import { redirectFor, stageOf } from "@/lib/routing";
+import { NEW_BUSINESS_PATH, redirectFor, stageOf } from "@/lib/routing";
 
 import { AppShell } from "./AppShell";
 import { useWorkspace } from "./TenantWorkspace";
 
 export function WorkspaceFrame({ children }: { children: ReactNode }) {
-  const { data } = useWorkspace();
+  const { data, session, switchTenant } = useWorkspace();
   const pathname = usePathname() ?? "";
   const router = useRouter();
 
   const stage = data ? stageOf(data.tenant.status, data.provisioning.status) : null;
-  const target = stage ? redirectFor(stage, pathname) : null;
+
+  // Businesses already found cancelled. Without this, an account whose
+  // businesses are *all* cancelled ping-pongs between them forever: each one
+  // says "you own another, open that instead" about the other, and every hop
+  // refetches seven endpoints. Remembering which have been tried makes the
+  // search terminate — at worst one switch per membership, then the form.
+  const tried = useRef<Set<string>>(new Set());
+  const target = stage && stage !== "onboarding" ? redirectFor(stage, pathname) : null;
 
   useEffect(() => {
     if (target) router.replace(target);
   }, [target, router]);
 
+  // The business the loaded data describes — not `tenantId`, which changes the
+  // moment a switch starts. Reading the stage from one and the id from the
+  // other lets a render disagree with itself and mark the wrong business tried.
+  const openedId = data?.tenant.id ?? null;
+
+  useEffect(() => {
+    if (stage !== "onboarding" || !openedId) return;
+    tried.current.add(openedId);
+    // Someone whose open business is cancelled may still own a live one.
+    // Opening that beats offering to create a third — but only ones we have
+    // not already looked at.
+    const next = session.memberships.find(
+      (membership) =>
+        membership.tenant_id !== openedId && !tried.current.has(membership.tenant_id),
+    )?.tenant_id;
+    if (next) switchTenant(next);
+    else router.replace(NEW_BUSINESS_PATH);
+  }, [stage, openedId, session.memberships, switchTenant, router]);
+
   if (!data) return <AppShell>{children}</AppShell>;
 
-  if (target) {
+  if (target || stage === "onboarding") {
     return (
       <main id="main" className="flex min-h-dvh flex-col items-center justify-center gap-3 px-4">
         <Spinner className="size-5 text-accent" />
         <p role="status" className="text-sm text-muted">
-          {stage === "dashboard" ? "Opening your dashboard…" : "Opening your setup…"}
+          {stage === "dashboard"
+            ? "Opening your dashboard…"
+            : stage === "onboarding"
+              ? "Taking you to set up a receptionist…"
+              : "Opening your setup…"}
         </p>
       </main>
     );

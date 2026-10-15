@@ -18,6 +18,10 @@ import type {
   CallDetailView,
   CallView,
   ConfigVersionView,
+  ContactImportResult,
+  ContactInput,
+  ContactListView,
+  ContactPatch,
   ContactView,
   DashboardSummaryView,
   IntegrationCheckView,
@@ -29,6 +33,7 @@ import type {
   PhoneNumberView,
   ProvisioningView,
   ReadinessView,
+  ReceptionistDeletionResult,
   RetryResult,
   RunSummaryView,
   SessionView,
@@ -38,6 +43,11 @@ import type {
   SmsStateView,
   TenantView,
   UsageView,
+  VoiceOptionView,
+  WebsiteChoicesUpdate,
+  WebsiteKnowledgeUpdate,
+  WebsiteSetupStart,
+  WebsiteSetupView,
 } from "./types";
 
 /** Convenience alias so callers and tests name the same thing. */
@@ -303,8 +313,63 @@ export function getCallDetail(tenantId: string, callId: string): Promise<CallDet
   return portal<CallDetailView>(`${tenantId}/calls/${callId}`);
 }
 
-export function listContacts(tenantId: string): Promise<ContactView[]> {
-  return portal<ContactView[]>(`${tenantId}/contacts`);
+/** A page of contacts. `status` is "active", "blocked" or "all". */
+export function listContacts(
+  tenantId: string,
+  options: { search?: string; status?: string; limit?: number; offset?: number } = {},
+): Promise<ContactListView> {
+  const query = new URLSearchParams();
+  if (options.search) query.set("search", options.search);
+  query.set("contact_status", options.status ?? "active");
+  query.set("limit", String(options.limit ?? 50));
+  query.set("offset", String(options.offset ?? 0));
+  return portal<ContactListView>(`${tenantId}/contacts?${query.toString()}`);
+}
+
+export function createContact(tenantId: string, input: ContactInput): Promise<ContactView> {
+  return send<ContactView>(`${tenantId}/contacts`, "POST", input);
+}
+
+export function updateContact(
+  tenantId: string,
+  contactId: string,
+  patch: ContactPatch,
+): Promise<ContactView> {
+  return send<ContactView>(`${tenantId}/contacts/${contactId}`, "PATCH", patch);
+}
+
+export function deleteContact(tenantId: string, contactId: string): Promise<void> {
+  return portal<void>(`${tenantId}/contacts/${contactId}`, { method: "DELETE" });
+}
+
+/** Moves the contact between tabs. It does not stop their calls being answered. */
+export function setContactBlocked(
+  tenantId: string,
+  contactId: string,
+  blocked: boolean,
+): Promise<ContactView> {
+  return send<ContactView>(`${tenantId}/contacts/${contactId}/block?blocked=${blocked}`, "POST");
+}
+
+/** Uploads a CSV. Returns a per-row report rather than a bare success. */
+export function importContacts(tenantId: string, file: File): Promise<ContactImportResult> {
+  const body = new FormData();
+  body.append("file", file);
+  return request<ContactImportResult>(`/api/v1/tenants/${tenantId}/contacts/import`, {
+    ...withCredentials,
+    method: "POST",
+    body,
+    // Deliberately no content-type: the browser must set the multipart
+    // boundary itself, and naming it here would make the body unparseable.
+    headers: {},
+  });
+}
+
+/** The URL the browser downloads from, with the filter the list is showing. */
+export function contactsExportUrl(tenantId: string, search: string, status: string): string {
+  const query = new URLSearchParams({ contact_status: status });
+  if (search) query.set("search", search);
+  return `${API_BASE_URL}/api/v1/tenants/${tenantId}/contacts/export?${query.toString()}`;
 }
 
 export function listConfigVersions(tenantId: string): Promise<ConfigVersionView[]> {
@@ -320,6 +385,22 @@ export function updateAgentSettings(
 
 export function retryProvisioning(tenantId: string): Promise<RetryResult> {
   return send<RetryResult>(`${tenantId}/provisioning/retry`, "POST");
+}
+
+/**
+ * Delete the receptionist. Owner only, and irreversible.
+ *
+ * ``releaseNumber`` hands the phone number back to Twilio, which may make it
+ * unrecoverable. Safe to call again if it reports ``complete: false``: the
+ * endpoint re-attempts only what failed.
+ */
+export function deleteReceptionist(
+  tenantId: string,
+  releaseNumber: boolean,
+): Promise<ReceptionistDeletionResult> {
+  return send<ReceptionistDeletionResult>(`${tenantId}/receptionist/delete`, "POST", {
+    release_number: releaseNumber,
+  });
 }
 
 export function listIntegrations(tenantId: string): Promise<IntegrationListView> {
@@ -580,4 +661,74 @@ export async function getReadiness(): Promise<ReadinessView> {
   const body = parseJson(await response.text()) as ReadinessView | null;
   if (body && typeof body === "object" && "checks" in body) return body;
   throw new ApiError(`Readiness check failed (${response.status})`, { status: response.status });
+}
+
+// ---------------------------------------------------------------------------
+// Website-based setup
+// ---------------------------------------------------------------------------
+
+/**
+ * Start reading a business website. Returns immediately (202): the crawl and
+ * the LLM call run as a job, so the customer may close the tab.
+ */
+export function startWebsiteSetup(payload: WebsiteSetupStart): Promise<WebsiteSetupView> {
+  return request<WebsiteSetupView>("/api/v1/website-setup", {
+    ...withCredentials,
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function getWebsiteSetup(): Promise<WebsiteSetupView> {
+  return request<WebsiteSetupView>("/api/v1/website-setup", withCredentials);
+}
+
+/** `null` when this account has no website setup in progress. */
+export function getWebsiteSetupOrNull(): Promise<WebsiteSetupView | null> {
+  return orNull(getWebsiteSetup());
+}
+
+export function saveWebsiteKnowledge(
+  payload: WebsiteKnowledgeUpdate,
+): Promise<WebsiteSetupView> {
+  return request<WebsiteSetupView>("/api/v1/website-setup/knowledge", {
+    ...withCredentials,
+    method: "PUT",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function saveWebsiteChoices(payload: WebsiteChoicesUpdate): Promise<WebsiteSetupView> {
+  return request<WebsiteSetupView>("/api/v1/website-setup/choices", {
+    ...withCredentials,
+    method: "PUT",
+    body: JSON.stringify(payload),
+  });
+}
+
+/** The voices this deployment is configured for. */
+export function listWebsiteVoices(): Promise<VoiceOptionView[]> {
+  return request<VoiceOptionView[]>("/api/v1/website-setup/voices", withCredentials);
+}
+
+export function retryWebsiteSetup(): Promise<WebsiteSetupView> {
+  return request<WebsiteSetupView>("/api/v1/website-setup/retry", {
+    ...withCredentials,
+    method: "POST",
+  });
+}
+
+/**
+ * Create the business from the reviewed draft. The only call here that
+ * provisions anything, and the only one that can spend money.
+ */
+export function confirmWebsiteSetup(): Promise<SignupResponse> {
+  return request<SignupResponse>("/api/v1/website-setup/confirm", {
+    ...withCredentials,
+    method: "POST",
+  });
+}
+
+export function discardWebsiteSetup(): Promise<void> {
+  return request<void>("/api/v1/website-setup", { ...withCredentials, method: "DELETE" });
 }

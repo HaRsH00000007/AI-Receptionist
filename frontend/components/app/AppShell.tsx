@@ -31,6 +31,7 @@ import { Logo } from "@/components/ui/Logo";
 import { Menu, type MenuItem } from "@/components/ui/Menu";
 import { formatNumber, initials, pluralize } from "@/lib/format";
 import { planName } from "@/lib/plans";
+import { workableMemberships } from "@/lib/routing";
 import { RECEPTIONIST_STATE, isUrgent, receptionistState } from "@/lib/status";
 
 import { ACCOUNT_NAV, MOBILE_TABS, PRIMARY_NAV, isActive, type NavItem } from "./navigation";
@@ -149,7 +150,9 @@ function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
   const pathname = usePathname() ?? "";
   const { session, tenantId, switchTenant, data } = useWorkspace();
   const switcherId = useId();
-  const memberships = session.memberships;
+  // Cancelled businesses are deliberately absent: the switcher offering one
+  // meant picking it, being bounced out, and landing back where you started.
+  const memberships = workableMemberships(session.memberships);
   const current = memberships.find((membership) => membership.tenant_id === tenantId);
 
   return (

@@ -276,6 +276,10 @@ class _Profile:
     greeting_custom: str | None = None
     escalation_raw: str | None = None
     escalation_json: ClassVar[dict[str, Any] | None] = None
+    #: A form-only business, so the generator stays on the v1 prompt. Present
+    #: on the double because the real column is.
+    knowledge_json: ClassVar[list[dict[str, Any]] | None] = None
+    caller_questions_json: ClassVar[list[dict[str, Any]] | None] = None
 
 
 async def test_a_valid_groq_reply_becomes_a_validated_config() -> None:

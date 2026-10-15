@@ -14,6 +14,8 @@ never off anything a model returned (docs/00_DECISIONS.md section 3).
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 from app.core.config import Settings
 from app.models.enums import GreetingStyle
 from app.schemas.agent_config import GeneratedAgentConfig
@@ -49,9 +51,21 @@ def render_hours(hours: BusinessHours) -> str:
 
 
 def render_system_prompt(
-    *, business_name: str, business_type: str, config: GeneratedAgentConfig
+    *,
+    business_name: str,
+    business_type: str,
+    config: GeneratedAgentConfig,
+    collect: Sequence[str] = (),
 ) -> str:
-    """The full instruction set given to the voice agent."""
+    """The full instruction set given to the voice agent.
+
+    ``collect`` is what the business chose to ask every caller for. It is
+    rendered here, deterministically, rather than left to the model: a customer
+    who switched "which service do you need?" on expects it asked on every
+    call, and an LLM that merely *usually* includes it in
+    ``call_handling_instructions`` is not the same promise. Empty for a
+    business set up from the form, which leaves this prompt unchanged.
+    """
     sections: list[str] = [
         f"You are the receptionist answering the phone for {business_name}, "
         f"a {business_type.replace('_', ' ')} business.",
@@ -78,6 +92,11 @@ def render_system_prompt(
         sections += ["", "Questions you can answer directly:"]
         for item in config.faq:
             sections += [f"Q: {item.question}", f"A: {item.answer}"]
+
+    if collect:
+        sections += ["", "Information to collect from every caller:"]
+        sections += [f"- {item}" for item in collect]
+        sections.append("Ask for these naturally during the call, not as a list.")
 
     sections += ["", "When a caller needs more than you can give:"]
     default_action = _ESCALATION_TEXT[config.escalation.default_mode]

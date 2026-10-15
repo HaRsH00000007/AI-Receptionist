@@ -20,21 +20,25 @@ import { useEffect, useState } from "react";
 
 import { Button } from "@/components/ui/Button";
 import { Spinner } from "@/components/ui/Spinner";
-import { getOnboardingDraft, getSessionOrNull, logout } from "@/lib/api";
+import { getOnboardingDraft, getSessionOrNull, getWebsiteSetupOrNull, logout } from "@/lib/api";
 import { onboardingRedirect } from "@/lib/routing";
-import type { SessionView } from "@/lib/types";
+import type { SessionView, WebsiteSetupView } from "@/lib/types";
 
+import { SetupChoice, type SetupMode } from "./SetupChoice";
 import { SignupWizard, restoreDraft, type WizardDraft } from "./SignupWizard";
+import { WebsiteWizard } from "./WebsiteWizard";
 
 type Check =
   | { status: "checking" }
   | { status: "redirecting"; to: string }
-  | { status: "show"; session: SessionView; draft: WizardDraft | null }
+  | { status: "show"; session: SessionView; draft: WizardDraft | null; website: WebsiteSetupView | null }
   | { status: "unavailable" };
 
 export function GetStartedGate() {
   const router = useRouter();
-  const another = useSearchParams()?.get("another") === "1";
+  const params = useSearchParams();
+  const another = params?.get("another") === "1";
+  const mode = params?.get("mode") === "website" ? "website" : params?.get("mode") === "manual" ? "manual" : null;
   const [check, setCheck] = useState<Check>({ status: "checking" });
 
   useEffect(() => {
@@ -63,7 +67,15 @@ export function GetStartedGate() {
       } catch {
         draft = null;
       }
-      if (!cancelled) setCheck({ status: "show", session, draft });
+      // An unfinished website setup is resumed, whatever mode the URL asks for:
+      // a half-read website is the strongest signal of where someone was.
+      let website: WebsiteSetupView | null = null;
+      try {
+        website = await getWebsiteSetupOrNull();
+      } catch {
+        website = null;
+      }
+      if (!cancelled) setCheck({ status: "show", session, draft, website });
     })();
     return () => {
       cancelled = true;
@@ -71,10 +83,42 @@ export function GetStartedGate() {
   }, [another, router]);
 
   if (check.status === "show") {
+    const resumable = check.website && check.website.status !== "confirmed";
+    const chosen: SetupMode | null = resumable ? "website" : mode;
+
+    function leave() {
+      // Back out of a flow: drop the mode and show both options again. The
+      // draft stays on the server, so returning resumes where they were.
+      const query = new URLSearchParams(params?.toString() ?? "");
+      query.delete("mode");
+      const rest = query.toString();
+      router.replace(rest ? `/get-started?${rest}` : "/get-started");
+    }
+
+    function choose(next: SetupMode) {
+      // In the URL, not in state: a refresh mid-setup should not dump someone
+      // back on the choice screen.
+      const query = new URLSearchParams(params?.toString() ?? "");
+      query.set("mode", next);
+      router.replace(`/get-started?${query.toString()}`);
+    }
+
     return (
       <div className="space-y-6">
         <AccountBar email={check.session.email} onSignedOut={() => router.replace("/login")} />
-        <SignupWizard accountEmail={check.session.email} draft={check.draft} />
+        {chosen === null && <SetupChoice onChoose={choose} />}
+        {chosen === "website" && (
+          <WebsiteWizard
+            accountEmail={check.session.email}
+            accountName={check.session.full_name ?? ""}
+            existing={check.website}
+            onSwitchToManual={() => choose("manual")}
+            onLeave={leave}
+          />
+        )}
+        {chosen === "manual" && (
+          <SignupWizard accountEmail={check.session.email} draft={check.draft} />
+        )}
       </div>
     );
   }

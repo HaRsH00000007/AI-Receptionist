@@ -28,6 +28,11 @@ dependencies = [
     # Encryption at rest for OAuth tokens a customer grants us (Google Calendar,
     # Outlook). Fernet: authenticated, versioned, and rotatable with MultiFernet.
     "cryptography>=43",
+    # Reading a customer's website during onboarding. Deliberately paired with
+    # the stdlib "html.parser" backend rather than lxml: lxml needs a compiled
+    # wheel, and this image installs no build toolchain. Business sites are
+    # malformed often enough that a forgiving parser matters more than speed.
+    "beautifulsoup4>=4.12",
 ]
 
 [dependency-groups]

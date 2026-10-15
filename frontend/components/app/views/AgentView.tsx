@@ -25,7 +25,8 @@ import {
   generatedByLabel,
   greetingStyleLabel,
 } from "@/components/app/BusinessDetails";
-import { useCanManage, useTenantData } from "@/components/app/TenantWorkspace";
+import { DeleteReceptionist } from "@/components/app/DeleteReceptionist";
+import { useCanManage, useIsOwner, useTenantData } from "@/components/app/TenantWorkspace";
 import { useLoad } from "@/components/app/useLoad";
 import { Alert } from "@/components/ui/Alert";
 import { Badge } from "@/components/ui/Badge";
@@ -76,6 +77,7 @@ function validate(form: AgentSettingsUpdate): Errors {
 export function AgentView() {
   const { tenant, provisioning, phone, agent, profile, tenantId, refresh } = useTenantData();
   const canManage = useCanManage();
+  const isOwner = useIsOwner();
   const toast = useToast();
   const versions = useLoad(() => listConfigVersions(tenantId), `versions:${tenantId}`);
 
@@ -340,6 +342,8 @@ export function AgentView() {
           </Card>
         </aside>
       </div>
+
+      {isOwner && <DeleteReceptionist />}
     </div>
   );
 }

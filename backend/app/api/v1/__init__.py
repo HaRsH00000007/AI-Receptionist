@@ -12,6 +12,7 @@ from fastapi import APIRouter
 from app.api.v1 import (
     admin,
     auth,
+    contacts,
     integrations,
     numbers,
     onboarding,
@@ -21,6 +22,7 @@ from app.api.v1 import (
     tenants,
     voice,
     webhooks,
+    website,
 )
 
 router = APIRouter()
@@ -33,10 +35,16 @@ router.include_router(numbers.router)
 router.include_router(signups.router)
 # The same form for someone already signed in: the account-first flow.
 router.include_router(onboarding.router)
+# The other way in: read the business's website and draft a receptionist from
+# it. Same destination, same provisioning pipeline, no second way to spend.
+router.include_router(website.router)
 router.include_router(tenants.router)
 # The signed-in portal. Same `/tenants/{id}` prefix, but membership-only: none
 # of it is reachable with the status grant that opens the post-signup page.
 router.include_router(portal.router)
+# Contacts: the same /tenants/{id} prefix, membership to read and admin to
+# write, like the rest of the portal.
+router.include_router(contacts.router)
 router.include_router(integrations.router)
 router.include_router(sms.router)
 router.include_router(webhooks.router)

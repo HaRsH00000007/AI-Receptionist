@@ -17,6 +17,10 @@ PROMPT_DIR = Path(__file__).resolve().parent
 #: Bump by adding a new file, never by editing one in place: an edited template
 #: would silently change what a recorded version means.
 AGENT_CONFIG_PROMPT = "agent_config.v1"
+#: Same shape, plus a block for knowledge taken from the business's own
+#: website. Chosen per tenant: a business set up from a form has no website
+#: knowledge and keeps using v1, so that path is bit-for-bit unchanged.
+AGENT_CONFIG_PROMPT_WITH_KNOWLEDGE = "agent_config.v2"
 CALL_SUMMARY_PROMPT = "call_summary.v1"
 
 

@@ -27,6 +27,7 @@ import { useToast } from "@/components/ui/Toast";
 import { ApiError, retryProvisioning } from "@/lib/api";
 import { formatPhone } from "@/lib/format";
 import { billingReason, friendlyError, receptionistState, stepLabel } from "@/lib/status";
+import { NEW_BUSINESS_PATH } from "@/lib/routing";
 
 export function SetupView() {
   const { tenant, provisioning, phone, refresh, tenantId } = useTenantData();
@@ -124,7 +125,7 @@ export function SetupView() {
           </p>
           <div className="flex shrink-0 flex-wrap gap-2">
             <SupportButton size="sm" />
-            <ButtonLink href="/get-started?another=1" size="sm">
+            <ButtonLink href={NEW_BUSINESS_PATH} size="sm">
               Set up a receptionist
             </ButtonLink>
           </div>

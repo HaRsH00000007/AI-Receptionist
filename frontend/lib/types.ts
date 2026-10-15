@@ -196,6 +196,8 @@ export interface PhoneNumberView {
   area_code: string | null;
   purchased_at: string | null;
   released_at: string | null;
+  /** True when we bought the number and can hand it back to Twilio. */
+  can_release: boolean;
 }
 
 export type CallStatus = "received" | "transcribed" | "summarized" | "notified" | "failed";
@@ -317,6 +319,12 @@ export interface TenantMembership {
   tenant_id: string;
   name: string;
   role: MembershipRole;
+  /**
+   * The business's own state. A `cancelled` or `abandoned` business is still a
+   * membership — the account owns its history — but it is not somewhere to
+   * work, so it is kept out of the organization switcher.
+   */
+  status: string;
 }
 
 /**
@@ -454,15 +462,65 @@ export interface CallDetailView extends CallView {
 }
 
 /** A caller, derived from call history. Not a CRM record. */
+export type ContactStatus = "active" | "blocked";
+export type ContactSource = "manual" | "call" | "import";
+
+/**
+ * A contact on file.
+ *
+ * Call statistics come from the call history rather than stored counters, so
+ * they can never disagree with the Calls page. `full_name` is null when nobody
+ * has given a name — the UI says "Unknown caller" and never invents one.
+ */
 export interface ContactView {
+  id: string;
   phone_e164: string;
-  name: string | null;
+  full_name: string | null;
+  note: string | null;
+  status: ContactStatus;
+  source: ContactSource;
+  created_at: string;
+  blocked_at: string | null;
   call_count: number;
   first_call_at: string | null;
   last_call_at: string | null;
-  last_summary: string | null;
-  last_intent: string | null;
-  has_urgent: boolean;
+}
+
+/** One page of contacts, with both tab counts so the tabs need no extra call. */
+export interface ContactListView {
+  contacts: ContactView[];
+  total: number;
+  active_count: number;
+  blocked_count: number;
+  limit: number;
+  offset: number;
+}
+
+export interface ContactInput {
+  phone_number: string;
+  full_name?: string;
+  note?: string;
+}
+
+/** An edit. An omitted field is left alone; an empty string clears it. */
+export interface ContactPatch {
+  phone_number?: string;
+  full_name?: string;
+  note?: string;
+}
+
+export interface ContactImportError {
+  row: number;
+  reason: string;
+}
+
+/** What an import did. Nothing is dropped silently. */
+export interface ContactImportResult {
+  imported: number;
+  updated: number;
+  skipped_duplicate: number;
+  invalid: number;
+  errors: ContactImportError[];
 }
 
 export interface ConfigVersionView {
@@ -487,6 +545,19 @@ export interface AgentUpdateResult {
   /** False when the new version is saved but the voice agent is not updated yet. */
   synced: boolean;
   detail: string;
+}
+
+export interface ReceptionistDeletionResult {
+  /** False when a vendor cleanup step failed. The receptionist has still stopped. */
+  complete: boolean;
+  tenant_status: string;
+  agent_deleted: boolean;
+  shared_agent_detached: boolean;
+  number_released: boolean;
+  /** Kept, and still billing. */
+  number_retained: string | null;
+  release_refused: string | null;
+  errors: string[];
 }
 
 export interface RetryResult {
@@ -596,4 +667,130 @@ export type OnboardingRequest = Omit<SignupRequest, "password">;
 export interface OnboardingDraftView {
   data: Record<string, unknown> | null;
   updated_at: string | null;
+}
+
+// ---------------------------------------------------------------------------
+// Website-based setup
+// ---------------------------------------------------------------------------
+
+export type WebsiteSetupStatus =
+  | "pending"
+  | "crawling"
+  | "generating"
+  | "ready"
+  | "failed"
+  | "confirmed";
+
+/** One thing the receptionist may tell a caller, with where it came from. */
+export interface KnowledgeItemView {
+  id: string;
+  category: string;
+  title: string;
+  content: string;
+  /** The page it was read from. Empty when it could not be attributed. */
+  source_url: string;
+  /** The model flagged this as unclear on the website. */
+  needs_review: boolean;
+  enabled: boolean;
+}
+
+/** Something to ask a caller. Name, email and phone are `builtin`. */
+export interface CallerQuestionView {
+  key: string;
+  label: string;
+  prompt: string;
+  builtin: boolean;
+  enabled: boolean;
+}
+
+/** A draft text message. Configuration only: there is no sending path yet. */
+export interface SmsTemplateView {
+  key: string;
+  label: string;
+  body: string;
+  enabled: boolean;
+}
+
+export interface WebsiteKnowledgeView {
+  business_name: string;
+  business_summary: string;
+  operating_hours: string;
+  services: string[];
+  items: KnowledgeItemView[];
+  questions: CallerQuestionView[];
+  sms_templates: SmsTemplateView[];
+}
+
+/** What the crawl did, so a thin result can be explained rather than guessed at. */
+export interface CrawlSummaryView {
+  site: string;
+  pages_read: number;
+  page_urls: string[];
+  skipped: number;
+  failed: number;
+  duplicates: number;
+  robots_blocked: number;
+  truncated: boolean;
+  reasons: Record<string, number>;
+}
+
+/** A voice this deployment is configured for. Never an invented one. */
+export interface VoiceOptionView {
+  voice_id: string;
+  label: string;
+  style: string | null;
+}
+
+export interface WebsiteSetupView {
+  id: string;
+  status: WebsiteSetupStatus;
+  website_url: string;
+  attempt: number;
+  /** A sentence for the customer; null while nothing has gone wrong. */
+  last_error: string | null;
+  ready: boolean;
+  tenant_id: string | null;
+  crawl: CrawlSummaryView | null;
+  knowledge: WebsiteKnowledgeView | null;
+  choices: Record<string, unknown> | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/** The first screen's answers, plus the website to read. */
+export interface WebsiteSetupStart {
+  website_url: string;
+  full_name?: string;
+  notification_email?: string;
+  contact_phone?: string;
+  heard_about?: string;
+}
+
+/** A whole-draft save: what is sent is what the receptionist will know. */
+export interface WebsiteKnowledgeUpdate {
+  business_name: string;
+  business_summary: string;
+  operating_hours: string;
+  services: string[];
+  items: KnowledgeItemView[];
+  questions: CallerQuestionView[];
+  sms_templates: SmsTemplateView[];
+}
+
+/** Voice, greeting and number choices. Saved screen by screen. */
+export interface WebsiteChoicesUpdate {
+  business_type?: BusinessType;
+  greeting_style?: GreetingStyle;
+  custom_greeting?: string;
+  voice_id?: string;
+  /** Only `"en"` is accepted today; the backend refuses anything else. */
+  language?: string;
+  recording_acknowledged?: boolean;
+  area_code?: string;
+  selected_number?: string;
+  escalation_rules?: string;
+  notification_email?: string;
+  contact_phone?: string;
+  full_name?: string;
+  plan?: Plan;
 }

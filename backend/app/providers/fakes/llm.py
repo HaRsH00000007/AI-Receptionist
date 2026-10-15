@@ -49,12 +49,65 @@ class FakeLLMProvider:
         if self.scripted:
             return LLMResponse(text=self.scripted.pop(0), model=model)
 
-        text = (
-            self._summary_json(user) if "transcript" in system.lower() else self._config_json(user)
-        )
+        if "UNTRUSTED WEBSITE CONTENT" in system:
+            # The website-onboarding prompt. Answered here so the whole flow
+            # works offline in DRY_RUN, and so the fake cannot be the reason a
+            # test passes: everything it returns is derived from the pages it
+            # was given, never invented.
+            text = self._website_knowledge_json(user)
+        elif "transcript" in system.lower():
+            text = self._summary_json(user)
+        else:
+            text = self._config_json(user)
         return LLMResponse(text=text, model=model, input_tokens=len(user) // 4, output_tokens=200)
 
     # ---- generated payloads ---------------------------------------------
+    def _website_knowledge_json(self, user: str) -> str:
+        """A knowledge draft built only from the words on the fake pages.
+
+        Deliberately dull. It takes the first page's title as the business
+        name and quotes real sentences back, so the knowledge step's own
+        "did this come from the site?" filter stays meaningful: a fake that
+        invented confident-sounding facts would make that check untestable.
+        """
+        pages = re.findall(r"^## PAGE (\S+)$", user, flags=re.MULTILINE)
+        titles = re.findall(r"^Title: (.+)$", user, flags=re.MULTILINE)
+        name = (titles[0] if titles else "The Business").strip()[:200]
+        source = pages[0] if pages else ""
+
+        # Sentences long enough to be worth saying, from the crawled text.
+        body = user.split("----- BEGIN UNTRUSTED WEBSITE CONTENT -----")[-1]
+        sentences = [
+            sentence.strip()
+            for sentence in re.split(r"(?<=[.!?])\s+", body)
+            if 25 <= len(sentence.strip()) <= 400 and not sentence.strip().startswith(("##", "-"))
+        ]
+        payload: dict[str, Any] = {
+            "business_name": name,
+            "business_summary": sentences[0] if sentences else "",
+            "operating_hours": "",
+            "services": [],
+            "items": [
+                {
+                    "category": "business_description",
+                    "title": "About The Business",
+                    "content": sentence,
+                    "source_url": source,
+                    "needs_review": False,
+                }
+                for sentence in sentences[:3]
+            ],
+            "questions": [
+                {
+                    "key": "reason_for_call",
+                    "label": "Reason for calling",
+                    "prompt": "Ask what the caller needs help with.",
+                }
+            ],
+            "sms_templates": [],
+        }
+        return json.dumps(payload)
+
     def _config_json(self, user: str) -> str:
         facts = _facts(user)
         name = facts.get("business name", "The Business")

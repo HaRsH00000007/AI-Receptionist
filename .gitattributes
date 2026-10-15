@@ -1,0 +1,21 @@
+# Binary files must never have their line endings rewritten.
+#
+# Without this, Git on Windows sees a PDF whose bytes happen to contain no NUL
+# and "helpfully" converts LF to CRLF on checkout, which corrupts the file. The
+# screenshots and the GTM document are the files this protects.
+
+*.pdf   binary
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.ico   binary
+*.webp  binary
+*.woff  binary
+*.woff2 binary
+*.ttf   binary
+*.otf   binary
+*.mp3   binary
+*.mp4   binary
+*.wav   binary
+*.zip   binary

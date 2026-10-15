@@ -69,7 +69,7 @@ function stub(view: ProvisioningView, phone: string | null = null, calls: api.Ca
   vi.spyOn(api, "getTenant").mockResolvedValue(TENANT);
   vi.spyOn(api, "getProvisioning").mockResolvedValue(view);
   vi.spyOn(api, "getPhoneOrNull").mockResolvedValue(
-    phone ? { e164: phone, status: "active", area_code: "805", purchased_at: null, released_at: null } : null,
+    phone ? { e164: phone, status: "active", area_code: "805", purchased_at: null, released_at: null, can_release: true } : null,
   );
   vi.spyOn(api, "listCalls").mockResolvedValue(calls);
 }

@@ -122,6 +122,11 @@ class PhoneNumberView(BaseModel):
     area_code: str | None
     purchased_at: datetime | None
     released_at: datetime | None
+    #: Whether we can hand this number back to Twilio — true when we bought it
+    #: and hold its SID. A number supplied from outside our account cannot be
+    #: released by us, and the delete dialog says so instead of offering it.
+    #: Derived from the SID; the SID itself is never serialised.
+    can_release: bool = False
 
 
 class AgentView(BaseModel):

@@ -95,7 +95,12 @@ async def _memberships_view(
         )
     )
     return [
-        TenantMembershipView(tenant_id=membership.tenant_id, name=tenant.name, role=membership.role)
+        TenantMembershipView(
+            tenant_id=membership.tenant_id,
+            name=tenant.name,
+            role=membership.role,
+            status=tenant.status,
+        )
         for membership, tenant in result.all()
     ]
 

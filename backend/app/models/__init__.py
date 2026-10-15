@@ -13,6 +13,7 @@ from app.models.audit import AuditLog
 from app.models.billing import BillingEvent, Subscription
 from app.models.business_profile import BusinessProfile
 from app.models.call import Call
+from app.models.contact import Contact
 from app.models.identity import Membership, Session, User
 from app.models.integration import TenantIntegration
 from app.models.onboarding import OnboardingDraft
@@ -29,6 +30,7 @@ from app.models.sms import SmsRegistration
 from app.models.tenant import Tenant
 from app.models.usage import UsageDaily, UsageEvent
 from app.models.webhook_event import WebhookEvent
+from app.models.website_onboarding import WebsiteOnboarding
 
 __all__ = [
     "Agent",
@@ -37,6 +39,7 @@ __all__ = [
     "BillingEvent",
     "BusinessProfile",
     "Call",
+    "Contact",
     "DataDeletionRequest",
     "IdempotencyKey",
     "Membership",
@@ -56,4 +59,5 @@ __all__ = [
     "UsageEvent",
     "User",
     "WebhookEvent",
+    "WebsiteOnboarding",
 ]

@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
+from typing import Any
 
 from pydantic import ValidationError
 
@@ -28,7 +29,12 @@ from app.core.errors import AppError
 from app.core.logging import get_logger
 from app.models import BusinessProfile, Tenant
 from app.models.enums import AgentConfigSource, GreetingStyle
-from app.prompts.loader import AGENT_CONFIG_PROMPT, load_prompt, split_sections
+from app.prompts.loader import (
+    AGENT_CONFIG_PROMPT,
+    AGENT_CONFIG_PROMPT_WITH_KNOWLEDGE,
+    load_prompt,
+    split_sections,
+)
 from app.providers.protocols import LLMProvider
 from app.schemas.agent_config import GeneratedAgentConfig
 from app.schemas.business import (
@@ -75,6 +81,67 @@ def extract_json(text: str) -> dict[str, object]:
     return parsed
 
 
+def _template_for(profile: BusinessProfile) -> str:
+    """v2 when this business learned from its website, v1 otherwise."""
+    return AGENT_CONFIG_PROMPT_WITH_KNOWLEDGE if profile.knowledge_json else AGENT_CONFIG_PROMPT
+
+
+def render_knowledge(items: list[dict[str, Any]] | None) -> str:
+    """Lay approved website knowledge out for the prompt.
+
+    Only enabled items, each with its title and source. A customer who switched
+    an item off on the review screen means the receptionist must not say it, so
+    "disabled" is enforced here rather than by hoping the model notices.
+    """
+    if not items:
+        return "none"
+    lines: list[str] = []
+    for item in items:
+        if not isinstance(item, dict) or not item.get("enabled", True):
+            continue
+        title = str(item.get("title") or "").strip()
+        content = str(item.get("content") or "").strip()
+        if not content:
+            continue
+        source = str(item.get("source_url") or "").strip()
+        block = f"### {title}\n{content}" if title else content
+        if source:
+            block += f"\n(Source: {source})"
+        lines.append(block)
+    return "\n\n".join(lines) if lines else "none"
+
+
+def render_caller_questions(questions: list[dict[str, Any]] | None) -> str:
+    """The enabled caller questions, as one line per question."""
+    if not questions:
+        return "name and phone number only"
+    lines = [
+        f"- {str(entry.get('label') or '').strip()}: {str(entry.get('prompt') or '').strip()}"
+        for entry in questions
+        if isinstance(entry, dict) and entry.get("enabled", True) and entry.get("label")
+    ]
+    return "\n".join(lines) if lines else "name and phone number only"
+
+
+def enabled_question_labels(questions: list[dict[str, Any]] | None) -> list[str]:
+    """Just the labels, for the deterministic half of the system prompt.
+
+    Order is preserved: a business that asks "which service?" before "when
+    would you like to come in?" means that order, and reordering the list on
+    the review screen is how they say so.
+    """
+    if not questions:
+        return []
+    labels: list[str] = []
+    for entry in questions:
+        if not isinstance(entry, dict) or not entry.get("enabled", True):
+            continue
+        label = str(entry.get("label") or "").strip()
+        if label and label not in labels:
+            labels.append(label[:80])
+    return labels
+
+
 class ConfigGenerator:
     """Generates one tenant's agent configuration."""
 
@@ -83,7 +150,12 @@ class ConfigGenerator:
         self.settings = settings
 
     async def generate(self, tenant: Tenant, profile: BusinessProfile) -> GenerationOutcome:
-        system, user_template = split_sections(load_prompt(AGENT_CONFIG_PROMPT))
+        # A business set up from the form has no website knowledge and keeps
+        # using v1 — unchanged prompt, unchanged output. v2 exists only to
+        # carry the knowledge block, and the version used is recorded on the
+        # config row, so "which prompt wrote this agent" stays answerable.
+        template_name = _template_for(profile)
+        system, user_template = split_sections(load_prompt(template_name))
         user = self._render_input(tenant, profile, user_template)
 
         attempts: list[str] = []
@@ -125,7 +197,7 @@ class ConfigGenerator:
                 config=self._with_chosen_greeting(config, profile),
                 source=AgentConfigSource.LLM,
                 detail=reply.model,
-                template_version=AGENT_CONFIG_PROMPT,
+                template_version=template_name,
             )
 
         logger.warning(
@@ -135,8 +207,8 @@ class ConfigGenerator:
         return GenerationOutcome(
             config=self._with_chosen_greeting(self.fallback_config(tenant, profile), profile),
             source=AgentConfigSource.TEMPLATE_FALLBACK,
-            detail=AGENT_CONFIG_PROMPT,
-            template_version=AGENT_CONFIG_PROMPT,
+            detail=template_name,
+            template_version=template_name,
         )
 
     def _with_chosen_greeting(
@@ -158,16 +230,20 @@ class ConfigGenerator:
 
     # ---- prompt construction --------------------------------------------
     def _render_input(self, tenant: Tenant, profile: BusinessProfile, template: str) -> str:
-        return template.format(
-            business_name=tenant.name,
-            business_type=tenant.business_type.value,
-            services=", ".join(profile.services) or "not specified",
-            operating_hours=profile.hours_raw or "not specified",
-            timezone=tenant.timezone,
-            greeting_style=profile.greeting_style.value,
-            escalation_rules=profile.escalation_raw or "not specified",
-            notification_email=tenant.contact_email,
-        )
+        values = {
+            "business_name": tenant.name,
+            "business_type": tenant.business_type.value,
+            "services": ", ".join(profile.services) or "not specified",
+            "operating_hours": profile.hours_raw or "not specified",
+            "timezone": tenant.timezone,
+            "greeting_style": profile.greeting_style.value,
+            "escalation_rules": profile.escalation_raw or "not specified",
+            "notification_email": tenant.contact_email,
+        }
+        if "{knowledge}" in template:
+            values["knowledge"] = render_knowledge(profile.knowledge_json)
+            values["caller_questions"] = render_caller_questions(profile.caller_questions_json)
+        return template.format(**values)
 
     def _repair_prompt(self, original: str, error: str) -> str:
         return (

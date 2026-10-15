@@ -27,6 +27,7 @@ from app.models.enums import CallStatus, NotificationKind
 from app.providers.registry import Providers
 from app.provisioning.retry import next_attempt_at, should_retry
 from app.schemas.agent_config import CallSummary
+from app.services.contacts import ContactService
 from app.services.email_templates import TEMPLATE_CALL_SUMMARY
 from app.services.notification_outbox import NotificationOutbox, call_summary_key
 from app.services.summarizer import Summarizer
@@ -128,6 +129,12 @@ class CallProcessor:
         except Exception as exc:  # noqa: BLE001 - classified below
             return await self._handle_failure(session, call.id, exc)
 
+        # Record the caller in the address book. Deliberately after the
+        # summary, because that is where a name becomes available, and
+        # deliberately swallowed: a contact is a convenience, and failing to
+        # write one must never cost the business its call record or its email.
+        await self._capture_contact(session, call, tenant)
+
         call.status = CallStatus.NOTIFIED
         call.next_attempt_at = None
         call.last_error = None
@@ -138,6 +145,25 @@ class CallProcessor:
             extra={"call_id": str(call.id), "tenant_id": str(tenant.id)},
         )
         return CallReport(call.id, "notified", call.status)
+
+    async def _capture_contact(self, session: AsyncSession, call: Call, tenant: Tenant) -> None:
+        """Add or update the caller's contact record, never fatally.
+
+        Idempotent through the unique constraint on (tenant, number), so a
+        redelivered webhook updates the row it already created rather than
+        making a second one. Any failure is logged and dropped: the call is the
+        obligation here, and an address-book entry is not worth losing it over.
+        """
+        try:
+            # Inside a savepoint: whatever goes wrong here is undone without
+            # touching the notification already staged on this transaction.
+            async with session.begin_nested():
+                await ContactService(session).capture_from_call(tenant_id=tenant.id, call=call)
+        except Exception:  # noqa: BLE001 - a contact must never cost us a call record
+            logger.warning(
+                "could not record the caller as a contact; the call is unaffected",
+                extra={"call_id": str(call.id), "tenant_id": str(tenant.id)},
+            )
 
     async def _meter(self, session: AsyncSession, call: Call, tenant: Tenant) -> None:
         """Record this call's minutes, exactly once.
