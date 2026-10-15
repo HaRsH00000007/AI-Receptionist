@@ -81,4 +81,17 @@ class BusinessProfile(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     #: ``select_voice_id``. Null means "whatever the style maps to".
     voice_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
+    #: What the owner calls their receptionist, for their own reference.
+    #:
+    #: A label, not configuration: it is never spoken, never rendered into the
+    #: prompt and never sent to a vendor, so changing it cannot change what a
+    #: caller hears. Null means "no name given" and the UI falls back to the
+    #: business name.
+    #:
+    #: It lives here rather than on ``agents`` because an ``Agent`` row is the
+    #: vendor's projection of a config, rebuilt on resync, while this is the
+    #: customer's own word for the thing. When one tenant can have several
+    #: agents (docs/00_DECISIONS.md s2) this column moves with that migration.
+    agent_name: Mapped[str | None] = mapped_column(String(80), nullable=True)
+
     tenant: Mapped[Tenant] = relationship(back_populates="business_profile")

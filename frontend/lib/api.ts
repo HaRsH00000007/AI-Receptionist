@@ -11,6 +11,7 @@ import type {
   AgentConfigDetailView,
   AgentConfigView,
   AgentSettingsUpdate,
+  TimezoneOptionView,
   AgentUpdateResult,
   AgentView,
   ApiErrorBody,
@@ -374,6 +375,17 @@ export function contactsExportUrl(tenantId: string, search: string, status: stri
 
 export function listConfigVersions(tenantId: string): Promise<ConfigVersionView[]> {
   return portal<ConfigVersionView[]>(`${tenantId}/agent/versions`);
+}
+
+/**
+ * The timezones a receptionist may be set to.
+ *
+ * Fetched rather than hard-coded here: the server validates against the same
+ * list, so shipping a copy in the client is a way to offer a choice the API
+ * then refuses.
+ */
+export function listTimezones(tenantId: string): Promise<TimezoneOptionView[]> {
+  return portal<TimezoneOptionView[]>(`${tenantId}/agent/timezones`);
 }
 
 export function updateAgentSettings(

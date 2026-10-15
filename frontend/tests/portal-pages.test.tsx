@@ -12,6 +12,7 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-li
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { TenantWorkspace } from "@/components/app/TenantWorkspace";
+import { AgentGeneral } from "@/components/app/agent/AgentGeneral";
 import { AgentView } from "@/components/app/views/AgentView";
 import { ContactsView } from "@/components/app/views/ContactsView";
 import { IntegrationsView } from "@/components/app/views/IntegrationsView";
@@ -58,6 +59,7 @@ vi.mock("@/lib/api", async () => {
     saveSmsRegistration: vi.fn(),
     submitSmsRegistration: vi.fn(),
     listConfigVersions: vi.fn(),
+    listTimezones: vi.fn(),
     updateAgentSettings: vi.fn(),
     deleteReceptionist: vi.fn(),
     listContacts: vi.fn(),
@@ -196,6 +198,7 @@ function givenLiveTenant() {
   });
   vi.mocked(api.listCalls).mockResolvedValue([]);
   vi.mocked(api.getProfileOrNull).mockResolvedValue({
+    agent_name: null,
     services: ["Consultations", "Wills"],
     hours_raw: "Mon-Fri 9-5",
     hours: null,
@@ -210,6 +213,11 @@ function givenLiveTenant() {
     business_type: "legal",
     integrations: LEGAL_CATALOG,
   });
+  vi.mocked(api.listTimezones).mockResolvedValue([
+    { timezone: "America/New_York", label: "Eastern Time" },
+    { timezone: "America/Chicago", label: "Central Time" },
+    { timezone: "America/Los_Angeles", label: "Pacific Time" },
+  ]);
   vi.mocked(api.listConfigVersions).mockResolvedValue([
     { version: 2, is_live: true, generated_by: "llm", created_at: "2026-09-02T00:00:00Z" },
     { version: 1, is_live: false, generated_by: "llm", created_at: "2026-09-01T00:00:00Z" },
@@ -788,5 +796,87 @@ describe("Contacts", () => {
     expect(await screen.findByText("Chris Patel")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /add contact/i })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /import csv/i })).not.toBeInTheDocument();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Agent -> General
+// ---------------------------------------------------------------------------
+
+describe("Agent / General", () => {
+  beforeEach(() => {
+    navigation.pathname = "/dashboard/agent";
+    vi.mocked(api.updateAgentSettings).mockResolvedValue({
+      config_version: 2,
+      previous_version: null,
+      generated_by: "llm",
+      synced: true,
+      detail: "Saved. Nothing your receptionist says has changed, so there was no new version to publish.",
+    });
+  });
+
+  it("sends the rest of the configuration untouched when only the name changes", async () => {
+    renderPage(<AgentGeneral />);
+
+    fireEvent.change(await screen.findByLabelText("Name"), { target: { value: "Hope" } });
+    fireEvent.click(screen.getByRole("button", { name: /save changes/i }));
+
+    await waitFor(() =>
+      expect(api.updateAgentSettings).toHaveBeenCalledWith("t1", {
+        services: "Consultations, Wills",
+        operating_hours: "Mon-Fri 9-5",
+        greeting_style: "formal",
+        custom_greeting: "",
+        escalation_rules: "",
+        agent_name: "Hope",
+      }),
+    );
+    // No timezone key at all: an unchanged zone must not look like an edit.
+    const sent = vi.mocked(api.updateAgentSettings).mock.calls[0]![1];
+    expect("timezone" in sent).toBe(false);
+  });
+
+  it("warns before a timezone change, because it republishes", async () => {
+    renderPage(<AgentGeneral />);
+
+    expect(screen.queryByText(/republishes your receptionist/i)).not.toBeInTheDocument();
+    fireEvent.change(await screen.findByLabelText("Time zone"), {
+      target: { value: "America/New_York" },
+    });
+
+    expect(screen.getByText(/republishes your receptionist/i)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /save changes/i }));
+    await waitFor(() =>
+      expect(vi.mocked(api.updateAgentSettings).mock.calls[0]![1].timezone).toBe(
+        "America/New_York",
+      ),
+    );
+  });
+
+  it("offers only the timezones the server sent", async () => {
+    renderPage(<AgentGeneral />);
+
+    const select = await screen.findByLabelText("Time zone");
+    const values = within(select).getAllByRole("option").map((o) => o.getAttribute("value"));
+    expect(values).toEqual(["America/New_York", "America/Chicago", "America/Los_Angeles"]);
+  });
+
+  it("cannot save until something changes", async () => {
+    renderPage(<AgentGeneral />);
+
+    const save = await screen.findByRole("button", { name: /save changes/i });
+    expect(save).toBeDisabled();
+
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Hope" } });
+    expect(save).toBeEnabled();
+  });
+
+  it("shows a member the settings but not the controls", async () => {
+    renderPage(<AgentGeneral />, MEMBER);
+
+    expect(await screen.findByLabelText("Name")).toBeDisabled();
+    expect(screen.queryByRole("button", { name: /save changes/i })).not.toBeInTheDocument();
+    expect(screen.getByText(/only an owner or admin/i)).toBeInTheDocument();
   });
 });

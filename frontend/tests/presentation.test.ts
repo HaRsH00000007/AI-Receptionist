@@ -105,6 +105,7 @@ describe("greetings", () => {
 
 describe("the configuration preview", () => {
   const PROFILE: BusinessProfileView = {
+    agent_name: null,
     services: ["Cuts", "Colour"],
     hours_raw: "Mon-Sat 9-6",
     hours: {

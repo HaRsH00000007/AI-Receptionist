@@ -38,6 +38,12 @@ from app.services.normalization import parse_opening_hours
 
 logger = get_logger(__name__)
 
+#: Fields a customer can change that the agent never reads. Saving one of these
+#: must not publish a configuration: the prompt would be byte-identical, and a
+#: version whose diff is empty makes the history useless for answering "what
+#: changed before the calls got worse?".
+_LABEL_ONLY_FIELDS = frozenset({"agent_name"})
+
 
 class AgentSettingsService:
     def __init__(self, session: AsyncSession, settings: Settings, providers: Providers) -> None:
@@ -64,17 +70,41 @@ class AgentSettingsService:
             raise NotFoundError("tenant has no business profile")
 
         changed = self._apply(profile, tenant, update)
-        if not changed:
+
+        # ``agent_name`` is the owner's label for the receptionist. It is never
+        # spoken, never rendered into the prompt and never sent to a vendor, so
+        # it cannot change a single word a caller hears — and must not cost a
+        # model call or burn a version number.
+        publishable = [field for field in changed if field not in _LABEL_ONLY_FIELDS]
+
+        if not publishable:
             # A new version costs a model call and adds a history entry that
             # says nothing. Report the live one instead.
             live = await ConfigVersionService(self.session).live(tenant.id)
+            if changed:
+                # Something was saved, just nothing the agent says. Record it,
+                # because "who renamed this" is still a question worth answering.
+                self.audit.record(
+                    AuditAction.PROFILE_UPDATED,
+                    actor_type=actor.actor_type,
+                    actor=actor.user,
+                    tenant_id=tenant.id,
+                    entity_type="business_profile",
+                    entity_id=profile.id,
+                    meta={"fields": changed, "published": False},
+                )
             if live is not None:
                 return AgentUpdateResult(
                     config_version=live.version,
                     previous_version=None,
                     generated_by=live.generated_by.value,
                     synced=True,
-                    detail="Nothing changed, so there was nothing to publish.",
+                    detail=(
+                        "Saved. Nothing your receptionist says has changed, so "
+                        "there was no new version to publish."
+                        if changed
+                        else "Nothing changed, so there was nothing to publish."
+                    ),
                 )
 
         # Bumped on every publish, so a config cached against the old profile
@@ -127,18 +157,42 @@ class AgentSettingsService:
     ) -> list[str]:
         """Write the new values onto the profile; return which fields changed."""
         changed: list[str] = []
+
+        # The name is a label the owner reads; it reaches no prompt and no
+        # vendor. Applied first simply so it is saved even when nothing else is.
+        if update.agent_name is not None:
+            name = update.agent_name or None
+            if name != profile.agent_name:
+                profile.agent_name = name
+                changed.append("agent_name")
+
+        # Before the hours, and deliberately: hours are *parsed into* a
+        # timezone, so a request that changes both must parse against the new
+        # one. Getting this order wrong stores "9-6 Pacific" for a business
+        # that just told us it is in New York.
+        timezone_changed = False
+        if update.timezone is not None and update.timezone != tenant.timezone:
+            tenant.timezone = update.timezone
+            changed.append("timezone")
+            timezone_changed = True
+
         services = list(update.services)  # normalized by the schema
         if services != list(profile.services):
             profile.services = services
             changed.append("services")
 
-        if update.operating_hours != (profile.hours_raw or ""):
+        # Re-parsed when the zone moves even if the words did not: the stored
+        # hours carry the timezone inside them, so leaving them alone would
+        # keep the old zone in the published config.
+        hours_text_changed = update.operating_hours != (profile.hours_raw or "")
+        if hours_text_changed or timezone_changed:
             profile.hours_raw = update.operating_hours
             hours = parse_opening_hours(update.operating_hours, timezone=tenant.timezone)
             # None when the text matched no known pattern; the generator then
             # reads the raw text, exactly as it does at signup. Never a guess.
             profile.hours_json = dump_json_column(hours) if hours else None
-            changed.append("operating_hours")
+            if hours_text_changed:
+                changed.append("operating_hours")
 
         if update.greeting_style is not profile.greeting_style:
             profile.greeting_style = update.greeting_style

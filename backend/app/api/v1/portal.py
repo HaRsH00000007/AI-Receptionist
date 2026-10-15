@@ -44,6 +44,7 @@ from app.schemas.portal import (
     RetryResult,
     TranscriptTurnView,
 )
+from app.schemas.views import TimezoneOptionView
 from app.services.agent_settings import AgentSettingsService
 from app.services.audit import Actor, AuditService
 from app.services.auth import Principal
@@ -239,6 +240,26 @@ async def list_config_versions(
             created_at=config.created_at,
         )
         for config in history
+    ]
+
+
+@router.get(
+    "/{tenant_id}/agent/timezones",
+    response_model=list[TimezoneOptionView],
+    summary="The timezones a receptionist may be set to",
+)
+async def list_timezones(principal: RequireMember) -> list[TimezoneOptionView]:
+    """Served rather than hard-coded in the client, so the list a customer
+    picks from is exactly the list the validator accepts.
+
+    Membership is required for no deeper reason than that everything under
+    ``/tenants/{id}`` is: the list itself is not sensitive.
+    """
+    from app.data.timezones import timezone_options
+
+    return [
+        TimezoneOptionView(timezone=option.timezone, label=option.label)
+        for option in timezone_options()
     ]
 
 

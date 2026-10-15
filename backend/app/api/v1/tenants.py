@@ -93,6 +93,7 @@ async def get_profile(tenant_id: TenantReadDep, session: SessionDep) -> Business
     ).scalar_one_or_none()
 
     return BusinessProfileView(
+        agent_name=profile.agent_name,
         services=list(profile.services),
         hours_raw=profile.hours_raw,
         hours=_stored(BusinessHours, profile.hours_json),

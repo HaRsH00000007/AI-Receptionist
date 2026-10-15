@@ -74,7 +74,12 @@ function validate(form: AgentSettingsUpdate): Errors {
   return errors;
 }
 
-export function AgentView() {
+/**
+ * @param embedded - Rendered inside the Agent section frame, which already
+ *   shows the page heading and the "call your agent" action. The flag only
+ *   suppresses that duplicate chrome; everything else is identical.
+ */
+export function AgentView({ embedded = false }: { embedded?: boolean } = {}) {
   const { tenant, provisioning, phone, agent, profile, tenantId, refresh } = useTenantData();
   const canManage = useCanManage();
   const isOwner = useIsOwner();
@@ -145,17 +150,19 @@ export function AgentView() {
 
   return (
     <div className="space-y-6 lg:space-y-8">
-      <PageHeader
-        title="Agent"
-        description="Your AI receptionist: what it knows about your business, and how it answers."
-        actions={
-          live && phone ? (
-            <ButtonLink href={`tel:${phone.e164}`} leadingIcon={<PhoneIcon size={16} />}>
-              Call your agent
-            </ButtonLink>
-          ) : undefined
-        }
-      />
+      {embedded ? null : (
+        <PageHeader
+          title="Agent"
+          description="Your AI receptionist: what it knows about your business, and how it answers."
+          actions={
+            live && phone ? (
+              <ButtonLink href={`tel:${phone.e164}`} leadingIcon={<PhoneIcon size={16} />}>
+                Call your agent
+              </ButtonLink>
+            ) : undefined
+          }
+        />
+      )}
 
       <Card className="overflow-hidden">
         <dl className="grid gap-px bg-line sm:grid-cols-2 lg:grid-cols-3">

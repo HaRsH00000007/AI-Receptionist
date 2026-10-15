@@ -49,6 +49,9 @@ class BusinessProfileView(BaseModel):
     config step fills the rest. The ``*_raw`` text is always what was submitted.
     """
 
+    #: The owner's own label for the receptionist, or ``None`` if they never
+    #: gave one. Callers never hear it.
+    agent_name: str | None
     services: list[str]
     hours_raw: str | None
     hours: BusinessHours | None
@@ -127,6 +130,18 @@ class PhoneNumberView(BaseModel):
     #: released by us, and the delete dialog says so instead of offering it.
     #: Derived from the SID; the SID itself is never serialised.
     can_release: bool = False
+
+
+class TimezoneOptionView(BaseModel):
+    """One timezone a business may choose.
+
+    The label is written for a US business owner; ``timezone`` is the IANA name
+    actually stored. The list comes from the server so a client cannot offer a
+    zone the API would reject.
+    """
+
+    timezone: str
+    label: str
 
 
 class AgentView(BaseModel):

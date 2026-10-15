@@ -291,6 +291,8 @@ export interface EscalationPolicy {
 }
 
 export interface BusinessProfileView {
+  /** What the owner calls their receptionist. Callers never hear it. */
+  agent_name: string | null;
   services: string[];
   /** Exactly what the business typed. Always present when submitted. */
   hours_raw: string | null;
@@ -536,6 +538,20 @@ export interface AgentSettingsUpdate {
   greeting_style: GreetingStyle;
   custom_greeting: string;
   escalation_rules: string;
+  /**
+   * The owner's label for the receptionist. Omit to leave it alone; "" clears
+   * it. Saving only this does not publish a new configuration, because the
+   * agent never reads it.
+   */
+  agent_name?: string;
+  /** IANA name, and only one the server offers. Omit to leave it alone. */
+  timezone?: string;
+}
+
+/** One timezone a business may pick, as the server offers it. */
+export interface TimezoneOptionView {
+  timezone: string;
+  label: string;
 }
 
 export interface AgentUpdateResult {

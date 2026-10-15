@@ -127,6 +127,21 @@ class AgentSettingsUpdate(BaseModel):
     custom_greeting: str = Field(default="", max_length=300)
     escalation_rules: str = Field(default="", max_length=2000)
 
+    #: The owner's own label for the receptionist. Blank clears it.
+    #:
+    #: Optional so a client written before this field existed still validates;
+    #: ``None`` means "leave it alone", which is different from "" meaning
+    #: "remove the name".
+    agent_name: str | None = Field(default=None, max_length=80)
+
+    #: The business's IANA timezone. ``None`` leaves it unchanged.
+    #:
+    #: Editable because it is *derived* at signup from the area code, and that
+    #: derivation is knowingly wrong for states spanning two zones (see
+    #: ``app.data.area_codes``). Hours mean nothing without it, so a business
+    #: given the wrong one needs to be able to say so.
+    timezone: str | None = Field(default=None, max_length=64)
+
     @field_validator("services")
     @classmethod
     def _services_are_real(cls, value: str | list[str]) -> list[str]:
@@ -149,6 +164,38 @@ class AgentSettingsUpdate(BaseModel):
         from app.services.normalization import normalize_greeting
 
         return normalize_greeting(value)
+
+    @field_validator("agent_name")
+    @classmethod
+    def _name_is_a_label(cls, value: str | None) -> str | None:
+        """Collapse whitespace. A name is one line, not a paragraph.
+
+        Newlines matter here even though the value is never spoken: it is shown
+        back in headings and in the agent list, and a label containing a line
+        break breaks both.
+        """
+        if value is None:
+            return None
+        return " ".join(value.split())
+
+    @field_validator("timezone")
+    @classmethod
+    def _timezone_is_one_we_support(cls, value: str | None) -> str | None:
+        """Only zones the product already reasons about.
+
+        This value is rendered into the agent's prompt and used to decide
+        whether the business is open, so an arbitrary IANA string — or a
+        plausible-looking one that does not exist — is refused rather than
+        stored and discovered at call time.
+        """
+        if value is None:
+            return None
+        from app.data.timezones import is_supported
+
+        candidate = value.strip()
+        if not is_supported(candidate):
+            raise ValueError("choose one of the offered timezones")
+        return candidate
 
 
 class AgentUpdateResult(BaseModel):

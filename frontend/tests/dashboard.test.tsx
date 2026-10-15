@@ -128,6 +128,7 @@ function givenHealthyTenant(usage: Record<string, unknown> = {}, calls: CallView
   });
   vi.mocked(api.listCalls).mockResolvedValue(calls);
   vi.mocked(api.getProfileOrNull).mockResolvedValue({
+    agent_name: null,
     services: ["Cuts", "Colour"],
     hours_raw: "Mon-Fri 9-6",
     hours: null,
