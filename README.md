@@ -6,7 +6,7 @@
 
 <img src="docs/images/landing.png" alt="Evenline landing page" width="100%">
 
-[Features](#features) · [Screenshots](#screenshots) · [System design](#system-design) · [Getting started](#getting-started) · [Testing](#testing) · [Known limitations](#known-limitations)
+[What's new](#whats-new) · [Features](#features) · [Screenshots](#screenshots) · [System design](#system-design) · [Getting started](#getting-started) · [Testing](#testing) · [Known limitations](#known-limitations)
 
 </div>
 
@@ -15,23 +15,91 @@
 ## What it does
 
 ```
-sign up ─► choose a number ─► provisioning (8 durable steps) ─► receptionist is LIVE
-                                                                    │
-caller dials ─► Twilio ─► ElevenLabs voice agent ─► post-call webhook ─► AI summary
-                                                                    │
-                                             owner gets an email + it appears in the dashboard
+sign up
+   │
+   ├─ "use my website"  ─►  read the site  ─►  review what it learned
+   └─ "set up manually" ─►  fill in the form
+   │
+   ▼
+choose a number ─►  provisioning (8 durable steps) ─►  receptionist is LIVE
+
+
+caller dials ─►  Twilio ─►  ElevenLabs voice agent ─►  post-call webhook ─►  AI summary
+                                                                                │
+                                                                                ▼
+                    owner gets an email · it appears in the dashboard ·
+                    the caller is saved as a contact
 ```
 
-A business owner fills in one guided form. The API validates and saves it in
-milliseconds and starts a durable provisioning workflow. That workflow writes the
-receptionist's configuration, checks the plan is entitled, buys the phone number
-the owner chose, creates a voice agent, connects the two and verifies the
-result. Every step is recorded, retryable and visible in the setup screen, so
-nothing can fail silently.
+A business owner either hands over their website or fills in one guided form.
+Both paths end in the same place, and **neither buys anything until the owner
+says so**.
+
+The API validates and saves the signup in milliseconds, then starts a durable
+provisioning workflow. That workflow writes the receptionist's configuration,
+checks the plan is entitled, buys the phone number the owner chose, creates a
+voice agent, connects the two and verifies the result. Every step is recorded,
+retryable and visible in the setup screen, so nothing can fail silently.
 
 The platform replaces a Make.com automation chain that had exactly that problem:
 a multi-step process with irreversible external side effects, no durable state,
 no idempotency and no visibility.
+
+---
+
+## What's new
+
+Three features landed in this round of work. The existing manual signup path is
+untouched — it still renders from the original prompt template, so a receptionist
+created before any of this answers exactly as it did. The one behaviour that did
+change for existing customers is the contacts page, which is
+[noted below](#contacts-1).
+
+### 1. Set up from your website
+
+Paste a URL instead of filling in a form. The platform reads a handful of the
+site's own pages, turns them into a list of facts the receptionist may share,
+and **shows the owner every one of them before anything goes live**. Items can
+be edited, switched off or added by hand.
+
+What makes this safe to point at the open internet:
+
+| Concern | How it is handled |
+|---|---|
+| **SSRF** | `app/website/guard.py` resolves DNS itself and refuses loopback, private, link-local and metadata addresses, credentials in the URL, dotless hosts, `.internal` names and any port outside 80/443/8080/8443. A hostname that resolves to a mix of public and private addresses is refused outright. |
+| **DNS rebinding** | Connections are pinned to the exact address that was vetted (`PinnedTransport`), with SNI preserved. Redirects do not follow automatically — each hop is re-validated. |
+| **Runaway crawls** | Hard budgets: 12 pages, depth 2, 2 MB per page, 12 MB and 45 seconds overall, 4 at a time. `robots.txt` is honoured. |
+| **Prompt injection from the page** | Page text reaches the model fenced as untrusted content, the reply is schema-validated, and any "fact" whose wording is not supported by the crawled text is dropped rather than shown. |
+| **Spending money** | Confirming the draft reuses the *existing* signup service. There is no second code path to a purchase, and the number is still bought by the same provisioning step behind the same billing gate. |
+
+### 2. Contacts
+
+Everyone who has called, plus anyone the business adds. Contacts are now real
+records rather than a view derived from the call history, so a name typed by the
+owner survives, and a contact can exist before anyone has called.
+
+- CSV **import and export** — import reports every row it could not read, with
+  spreadsheet row numbers; export prefixes `=`, `+`, `-` and `@` so a cell can
+  never execute as a formula.
+- **Blocking marks and filters a contact; it does not refuse their calls.**
+  Refusing a caller is a decision with consequences a business should make
+  deliberately, so the product does not make it on their behalf. The UI says so.
+- A name the owner typed is **never** overwritten by one a caller claimed.
+
+### 3. Delete a receptionist
+
+Owners can stop and remove a receptionist themselves, and choose whether to
+hand the phone number back. The tenant row and the call history are always
+kept; a shared vertical agent is detached, never deleted. If a vendor cleanup
+step fails the response says what is still outstanding and a retry finishes the
+job.
+
+<table>
+  <tr>
+    <td width="50%"><img src="docs/images/setup-choice.png" alt="Choosing between website setup and manual setup"><br><sub><b>Two ways in.</b> Nothing goes live until the owner says so.</sub></td>
+    <td width="50%"><img src="docs/images/contacts.png" alt="Contacts"><br><sub><b>Contacts</b>, with search, Active/Blocked tabs and per-contact call counts.</sub></td>
+  </tr>
+</table>
 
 ---
 
@@ -41,6 +109,9 @@ no idempotency and no visibility.
 
 | | |
 |---|---|
+| **Set up from your website** 🆕 | Hand over a URL and the platform reads the site, then shows you every fact it learned so you can correct it. Eight steps, resumable, and nothing reaches a caller unreviewed. |
+| **Contacts** 🆕 | Everyone who has called, plus anyone you add. Search, notes, blocking, and CSV import and export. |
+| **Delete your receptionist** 🆕 | Stop and remove it yourself, and choose whether to keep the number. Your call history stays. |
 | **Guided onboarding** | Five steps: business, receptionist, phone, review and activate. A live preview shows exactly what callers will hear. |
 | **Custom greetings** 🆕 | Three ways to open a call: have one written from your details, pick a ready-made line in your chosen style, or write your own wording. What you preview is what callers hear. |
 | **Choose your own number** 🆕 | Search the numbers actually available in your area code and pick one. If that area code is sold out, **nearby numbers in the same state** are offered instead, never just the next code up numerically. Your pick is bought as chosen, and if someone else takes it first, setup finds the closest match rather than failing. |
@@ -67,6 +138,37 @@ no idempotency and no visibility.
 
 > These are from a local demo run with **every vendor faked** (`DRY_RUN=true`)
 > and sample call data. No real numbers were bought and no real calls placed.
+> The signed-in address is shown as `owner@example.com`; the website in the
+> setup screenshots is a placeholder domain, and that draft was seeded locally
+> rather than crawled from anyone's site.
+
+### Setting up from a website
+
+<table>
+  <tr>
+    <td width="50%"><img src="docs/images/website-url.png" alt="Step 2: enter your website"><br><sub><b>Step 2 — Your website.</b> A public page, read without signing in, honouring <code>robots.txt</code>.</sub></td>
+    <td width="50%"><img src="docs/images/website-knowledge.png" alt="Step 4: review what the agent learned"><br><sub><b>Step 4 — Knowledge.</b> Every extracted fact, with its own switch. "Check this" marks anything the crawl was unsure of.</sub></td>
+  </tr>
+  <tr>
+    <td width="50%"><img src="docs/images/website-questions.png" alt="Step 5: what the agent asks callers"><br><sub><b>Step 5 — Questions.</b> What the receptionist asks a caller. Name, email and phone are built in and can be switched off, not renamed.</sub></td>
+    <td width="50%"><img src="docs/images/website-voice.png" alt="Step 6: choose a voice"><br><sub><b>Step 6 — Voice.</b> Only the voices this deployment is actually configured for. English is the only language the call path supports, and it says so.</sub></td>
+  </tr>
+  <tr>
+    <td width="50%"><img src="docs/images/website-greeting.png" alt="Step 7: how the agent introduces itself"><br><sub><b>Step 7 — Greeting.</b> Callers hear this word for word.</sub></td>
+    <td width="50%"><img src="docs/images/website-number.png" alt="Step 8: pick a number and create"><br><sub><b>Step 8 — Number.</b> Everything the receptionist will start with. <b>Nothing has been bought up to this point.</b></sub></td>
+  </tr>
+</table>
+
+### Contacts
+
+<img src="docs/images/contacts.png" alt="Contacts" width="100%">
+
+<table>
+  <tr>
+    <td width="50%"><img src="docs/images/contacts-import.png" alt="Importing contacts from a CSV"><br><sub><b>Import.</b> An import fills in blanks and never overwrites what the owner typed. Unreadable rows are listed back.</sub></td>
+    <td width="50%"><img src="docs/images/agent-delete-confirm.png" alt="Deleting a receptionist"><br><sub><b>Deleting a receptionist.</b> Releasing the number is a separate, explicit choice, with its consequence spelled out.</sub></td>
+  </tr>
+</table>
 
 ### Onboarding
 
@@ -149,7 +251,7 @@ flowchart LR
 
     subgraph Workers["Background workers"]
         TW["Temporal worker<br/>provisioning workflow"]
-        PW["Polling worker<br/>post-call · email outbox<br/>retention · usage rollups"]
+        PW["Polling worker<br/>post-call · email outbox<br/>website reading · retention<br/>usage rollups"]
     end
 
     subgraph State
@@ -164,6 +266,7 @@ flowchart LR
         LLM["LLM<br/>Anthropic · OpenAI · Groq"]
         MAIL["Email<br/>Resend · SendGrid · SMTP"]
         STRIPE["Stripe<br/>billing"]
+        SITE["The customer's<br/>own website"]
     end
 
     CALLER(["Caller"])
@@ -181,6 +284,7 @@ flowchart LR
     PW --> PG
     PW --> LLM
     PW --> MAIL
+    PW -- "read, through the SSRF guard" --> SITE
     CALLER -- "dials the number" --> TWILIO
     TWILIO --> EL
     EL -- "post-call transcript" --> HOOKS
@@ -238,6 +342,55 @@ errors fail the run, and **compensation** releases the number and deletes the
 agent so nothing keeps billing. A step that finds its work already done, such
 as a number already tagged to this tenant at Twilio, **adopts** it instead of
 repeating it.
+
+### Setting up from a website
+
+The crawl and the LLM call both happen in a **leased background job**
+(`FOR UPDATE SKIP LOCKED`, three attempts), not in the request, so the owner can
+close the tab. The wizard polls the draft.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Owner
+    participant Web as Next.js wizard
+    participant API as FastAPI
+    participant DB as PostgreSQL
+    participant W as Polling worker
+    participant Guard as SSRF guard
+    participant Site as The owner's website
+    participant LLM
+
+    Owner->>Web: pastes example.com
+    Web->>API: POST /website-setup
+    API->>Guard: is this host allowed at all?
+    Guard-->>API: resolved public addresses
+    API->>DB: draft (pending)
+    API-->>Web: 202
+    W->>DB: claim the draft
+    W->>Guard: re-resolve and pin each address
+    W->>Site: fetch, pinned, robots-aware, budgeted
+    Site-->>W: a handful of pages
+    W->>LLM: page text, fenced as UNTRUSTED
+    LLM-->>W: candidate facts
+    Note over W: schema-checked; anything the<br/>pages do not support is dropped
+    W->>DB: draft (ready)
+    Web->>API: GET /website-setup (polling)
+    Owner->>Web: edits, switches items off, picks a voice
+    Owner->>Web: "Create my receptionist"
+    Web->>API: POST /website-setup/confirm
+    API->>API: build the manual form's own request
+    Note over API: reuses SignupService — the number<br/>is still bought by the normal<br/>provisioning step, behind the<br/>normal billing gate
+```
+
+Two rules this design exists to keep:
+
+1. **Nothing a website says becomes an instruction.** Page text is data. It is
+   fenced in the prompt, the reply is parsed against a schema, and a claim the
+   crawled text does not support never reaches the review screen.
+2. **There is one path to a purchase.** Confirming a website draft assembles the
+   same request the manual form produces and hands it to the same service. A
+   second way to spend money is a second way to spend it twice.
 
 ### Signup and choosing a number
 
@@ -341,6 +494,8 @@ erDiagram
     TENANTS ||--o{ AGENT_CONFIGS : "versions of"
     TENANTS ||--o| AGENTS : "answered by"
     TENANTS ||--o{ CALLS : receives
+    TENANTS ||--o{ CONTACTS : "keeps on file"
+    USERS ||--o| WEBSITE_ONBOARDINGS : "may be setting up from a site"
     CALLS ||--o{ USAGE_EVENTS : meters
     CALLS ||--o{ RECORDINGS : "may have"
     TENANTS ||--o{ SUBSCRIPTIONS : "billed by"
@@ -368,7 +523,22 @@ erDiagram
         string intent
         int urgency
     }
+    CONTACTS {
+        string phone_e164 "unique per tenant"
+        string full_name "nullable: unknown callers exist"
+        string status "active or blocked"
+        string source "manual, call or import"
+    }
+    WEBSITE_ONBOARDINGS {
+        string website_url
+        string status "pending, crawling, generating, ready, confirmed"
+        json knowledge_json "the draft the owner edits"
+    }
 ```
+
+A contact's **call count is never stored** — it is read from `calls` — so the
+two can't disagree. Deleting a contact tidies the address book and leaves the
+call history alone.
 
 Supporting tables: `webhook_events` (dedupe), `idempotency_keys`,
 `billing_events`, `usage_daily`, `data_deletion_requests`.
@@ -386,6 +556,7 @@ Supporting tables: `webhook_events` (dedupe), `idempotency_keys`,
 | **Cache and locks** | Redis 7, always with a PostgreSQL fallback |
 | **Voice** | Twilio (numbers), ElevenLabs (conversational agent) |
 | **LLM** | Anthropic, OpenAI or Groq, behind one interface |
+| **Website reading** | httpx with a pinned transport, BeautifulSoup for extraction, `robots.txt` honoured |
 | **Email** | Resend, SendGrid or SMTP, delivered through a durable outbox |
 | **Billing** | Stripe |
 | **Auth** | Argon2id passwords, magic links, HttpOnly session cookies, role-based memberships |
@@ -399,6 +570,7 @@ Supporting tables: `webhook_events` (dedupe), `idempotency_keys`,
 backend/
   app/
     api/v1/            signups · numbers · auth · tenants · admin · webhooks · voice
+                       website (website-based setup) · contacts
     core/              config, logging, correlation ids, error taxonomy, metrics
     data/              area code → state → timezone (no LLM involved)
     models/            SQLAlchemy models and the state-machine enums
@@ -408,17 +580,21 @@ backend/
       real/            httpx adapters: Twilio, ElevenLabs, LLMs, email, Stripe
     provisioning/      the step engine, retry policy, compensation, one module per step
     temporal/          workflow, activities, worker
+    website/           guard.py (SSRF boundary) · crawler.py (pinned, budgeted)
+                       knowledge.py (the LLM step, schema-checked)
     services/          signup, auth, passwords, number search, config generation,
-                       summaries, billing gate, notifications, usage, retention
+                       summaries, billing gate, notifications, usage, retention,
+                       website_onboarding, contacts, receptionist_deletion
     worker.py          the polling worker (python -m app.worker)
   migrations/          Alembic
-  tests/               856 tests against real PostgreSQL
+  tests/               1,074 tests against real PostgreSQL
 frontend/
   app/                 routes: (marketing), (auth), (onboarding), dashboard, admin, status
   components/          ui/ · app/ · onboarding/ · auth/ · marketing/ · admin/
   lib/                 typed API client, types, formatting, brand
-  tests/               113 tests
+  tests/               188 tests
 docs/                  decisions, plans, operations, telephony, webhooks, screenshots
+  gtm/                 go-to-market and cost management
 ```
 
 ---
@@ -503,6 +679,13 @@ keep working: `business_profiles.greeting_custom` (custom greetings),
 `tenants.requested_number` (choosing a number) and `users.password_hash`
 (password sign-in).
 
+The two newest are **`9b4e1c73af52`** (`website_onboardings`, plus four nullable
+columns on `business_profiles`) and **`c41d7e9a2b60`** (`contacts`). Both add
+tables and nullable columns only — no existing column is altered or dropped, so
+rolling forward does not require downtime and rolling back loses only the new
+data. Both were verified locally against an existing database *and* against a
+freshly built one, upgrade and downgrade.
+
 ---
 
 ## Testing
@@ -512,12 +695,15 @@ keep working: `business_profiles.greeting_custom` (custom greetings),
 cd backend
 uv run ruff check . && uv run ruff format --check .
 uv run mypy app
-uv run pytest                 # 856 passed, 10 skipped
+uv run pytest                 # 1,074 passed
 
 # frontend: lint, types, tests, production build
 cd frontend
-npm run lint && npm run typecheck && npm run test && npm run build   # 113 tests
+npm run lint && npm run typecheck && npm run test && npm run build   # 188 tests
 ```
+
+> Run the backend suite **on its own**. Two pytest sessions sharing the test
+> database deadlock on `TRUNCATE` and report failures that aren't real.
 
 Backend tests run against **real PostgreSQL**, never SQLite, because the schema
 relies on JSONB, partial unique indexes and `FOR UPDATE SKIP LOCKED`. The test
@@ -531,6 +717,41 @@ genuinely exercised.
 
 ## Known limitations
 
+### Website-based setup
+
+- **English only.** The call path sends `"language": "en"` and nothing else, so
+  the wizard offers one language and the API refuses any other value with a 422
+  rather than accepting a setting it would ignore.
+- **SMS templates are saved, not sent.** They are stored with the receptionist
+  and are off by default. Sending them needs a registered A2P 10DLC campaign,
+  which does not exist yet; the UI says so where they are shown.
+- **A thin or JavaScript-rendered site yields little.** The crawler reads
+  server-rendered HTML. A site that paints its content with JavaScript will
+  produce few facts, and the owner has to fill them in by hand.
+- **The crawl has not been run against a large sample of real sites.** The
+  budgets and the extraction are covered by tests against fixed HTML; how often
+  a real small-business site produces something useful is not yet measured.
+
+### Contacts
+
+- **A contact is created after a call is summarised,** not when the call
+  arrives. A call whose summarisation keeps failing stays visible in Calls but
+  never appears in Contacts.
+- **Phone numbers are US-only** (NANP). Manual entry and import reject anything
+  else. Capture stores the number exactly as the provider sent it, so in theory
+  a non-E.164 inbound number could create a contact that manual entry could not
+  have matched.
+- **Export is CSV, not XLSX**, and has no row cap: a very large contact list is
+  built in memory before it is sent.
+- **Blocking does not refuse calls.** It marks and filters the contact. A
+  business may reasonably expect otherwise, which is why the dialog says what it
+  does and does not do.
+- The contacts page **no longer shows** the last summary, last intent or an
+  urgency flag per caller, which the older derived view did. That detail now
+  lives on the call itself.
+
+### Platform
+
 - **Email needs a verified sending domain.** Resend's shared test sender only
   delivers to the Resend account owner. Until a domain is verified, activation
   emails, call summaries and magic links reach nobody else. Password sign-in
@@ -540,9 +761,10 @@ genuinely exercised.
 - **A full live run isn't verified end to end.** Real number, real agent, real
   inbound call. The real adapters are tested against recorded request and
   response shapes, but vendor behaviour only shows up on a live account.
-- **Limited self-service editing.** Owners can view their configuration, but
-  changing it, pausing the receptionist, managing numbers or team members, and
-  closing an account aren't built yet.
+- **Limited self-service editing.** Owners can now delete a receptionist and
+  manage their contacts, but editing a live configuration, pausing the
+  receptionist, managing numbers or team members, and closing an account aren't
+  built yet.
 - **Tenants created before password sign-in have no account.** A new signup
   creates one. Tenants that are still live and predate the change need a
   backfill.
@@ -554,9 +776,11 @@ genuinely exercised.
 1. Verify a sending domain, then add password reset and signup confirmation emails.
 2. A complete live run against real Twilio and ElevenLabs, recorded as contract tests.
 3. Customer self-service: edit configuration, pause the receptionist, manage numbers and team.
-4. Calendar and website integrations (booking, embedded widget).
-5. SMS follow-ups, which need a registered A2P 10DLC campaign.
-6. Observability: OpenTelemetry traces by tenant and call, SLOs and alerting.
+4. Decide what blocking a contact should actually do, and build it deliberately.
+5. Measure the website crawl against a real sample of small-business sites.
+6. SMS follow-ups, which need a registered A2P 10DLC campaign — the templates are already drafted and stored.
+7. Calendar and website integrations (booking, embedded widget).
+8. Observability: OpenTelemetry traces by tenant and call, SLOs and alerting.
 
 ---
 
@@ -572,4 +796,5 @@ genuinely exercised.
 | [`docs/OPERATIONS.md`](docs/OPERATIONS.md) | Incident response and recovery |
 | [`docs/E2E_TESTING.md`](docs/E2E_TESTING.md) | The full journey, and what it does not prove |
 | [`docs/LIVE_E2E_TEST_READINESS.md`](docs/LIVE_E2E_TEST_READINESS.md) | Checklist before a live end-to-end run |
+| [`docs/gtm/`](docs/gtm/) | Go-to-market plan and a cost breakdown per deployment, tool and call |
 | [`backend/README.md`](backend/README.md) | Backend conventions and workflow |
