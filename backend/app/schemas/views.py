@@ -60,6 +60,10 @@ class BusinessProfileView(BaseModel):
     #: to write one. Distinct from ``greeting`` below, which is whatever is live
     #: now — the two differ while a new choice is waiting to be generated.
     custom_greeting: str | None
+    #: The sign-off the owner wrote, or ``None`` if they have not written one.
+    #: Followed as an instruction rather than spoken from a vendor field; see
+    #: ``BusinessProfile.goodbye_custom``.
+    custom_goodbye: str | None
     escalation_raw: str | None
     escalation: EscalationPolicy | None
     greeting: str | None

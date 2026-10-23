@@ -19,6 +19,7 @@ ElevenLabs owns the number, Twilio never posts here at all.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import APIRouter, Request, Response
@@ -33,6 +34,7 @@ from app.core.logging import get_logger
 from app.db.session import SessionDep
 from app.models import Agent, Tenant
 from app.models.enums import AgentStatus
+from app.services.greeting_schedule import active_greeting, schedule_of_config
 from app.services.normalization import normalize_phone
 from app.services.signatures import public_request_url, verify_twilio
 from app.telephony import twiml
@@ -197,7 +199,7 @@ async def _resolve(
 
     row = (
         await session.execute(
-            select(Tenant.name, Agent.elevenlabs_agent_id)
+            select(Tenant.name, Tenant.timezone, Agent.elevenlabs_agent_id)
             .select_from(Tenant)
             .outerjoin(
                 Agent,
@@ -208,13 +210,14 @@ async def _resolve(
         )
     ).first()
 
-    business_name, agent_id = row if row is not None else (None, None)
+    business_name, timezone, agent_id = row if row is not None else (None, None, None)
     return RoutingInput(
         dialled_e164=owner.e164,
         tenant_id=owner.tenant_id,
         tenant_status=owner.tenant_status,
         agent_id=agent_id,
         business_name=business_name,
+        timezone=timezone,
     )
 
 
@@ -250,7 +253,17 @@ async def _dynamic_variables(
     variables["config_version"] = str(config.get("version", ""))
     first_message = config.get("first_message")
     if isinstance(first_message, str) and first_message:
-        variables["greeting"] = first_message
+        # The schedule travels on the configuration, so a greeting that is only
+        # right between certain hours is resolved here, in process, against the
+        # business's own clock — no second query on the audible path. A
+        # business with no scheduled greetings pays one comparison for this.
+        greeting, _ = active_greeting(
+            schedule_of_config(config.get("model_params")),
+            moment=datetime.now(UTC),
+            timezone=routing.timezone or "UTC",
+            default=first_message,
+        )
+        variables["greeting"] = greeting
     system_prompt = config.get("system_prompt")
     if isinstance(system_prompt, str) and system_prompt:
         variables["business_instructions"] = system_prompt

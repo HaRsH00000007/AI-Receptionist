@@ -39,6 +39,7 @@ from app.db.session import create_engine, create_session_factory
 from app.providers.registry import Providers, build_providers
 from app.provisioning.engine import ProvisioningEngine, claim_runs
 from app.services.call_processor import CallProcessor, claim_calls
+from app.services.greeting_sync import sweep_scheduled_greetings
 from app.services.notification_outbox import NotificationOutbox
 from app.services.retention import RetentionService
 from app.services.usage import rebuild_recent_rollups
@@ -61,6 +62,7 @@ class WorkerStats:
     calls_processed: int = 0
     notifications_delivered: int = 0
     websites_processed: int = 0
+    greetings_switched: int = 0
     maintenance_runs: int = 0
 
 
@@ -160,6 +162,18 @@ class Worker:
             async with self.session_factory() as session:
                 await self.websites.process(session, website_id)
             self.stats.websites_processed += 1
+
+        # Scheduled greetings. Every tick rather than on the maintenance
+        # cadence, because this is the one thing here whose right answer
+        # changes with the clock alone: a lunch-hour greeting that arrives
+        # forty minutes into lunch is worse than not offering the feature.
+        # One indexed EXISTS when no business uses it.
+        try:
+            async with self.session_factory() as session:
+                switched = await sweep_scheduled_greetings(session, self.settings, self.providers)
+            self.stats.greetings_switched += switched
+        except Exception:
+            logger.exception("the greeting sweep failed; it will run again next tick")
 
         await self._maintenance()
         return self.stats

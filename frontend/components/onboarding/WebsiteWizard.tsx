@@ -46,11 +46,10 @@ import { Spinner } from "@/components/ui/Spinner";
 import {
   ApiError,
   confirmWebsiteSetup,
+  discardWebsiteSetup,
   getWebsiteSetup,
   listWebsiteVoices,
   retryWebsiteSetup,
-  saveWebsiteChoices,
-  saveWebsiteKnowledge,
   searchAvailableNumbers,
   startWebsiteSetup,
 } from "@/lib/api";
@@ -244,13 +243,10 @@ export function WebsiteWizard({
     setError(null);
     setFieldErrors({});
     try {
-      const started = await startWebsiteSetup({
-        website_url: websiteUrl,
-        full_name: fullName,
-        notification_email: email,
-        contact_phone: phone,
-        heard_about: heardAbout,
-      });
+      // The address, and nothing else. The basics screen stays in the browser
+      // with the rest of them until the create button; the crawl only ever
+      // needed somewhere to read.
+      const started = await startWebsiteSetup({ website_url: websiteUrl });
       setJob(started);
       setStep(2);
     } catch (caught) {
@@ -267,44 +263,6 @@ export function WebsiteWizard({
       setStep(2);
     } catch (caught) {
       fail(caught, "We couldn't try that again.");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function saveKnowledge(next: WebsiteKnowledgeView): Promise<boolean> {
-    setBusy(true);
-    setError(null);
-    try {
-      const saved = await saveWebsiteKnowledge({
-        business_name: next.business_name,
-        business_summary: next.business_summary,
-        operating_hours: next.operating_hours,
-        services: next.services,
-        items: next.items,
-        questions: next.questions,
-        sms_templates: next.sms_templates,
-      });
-      setJob(saved);
-      setKnowledge(saved.knowledge);
-      return true;
-    } catch (caught) {
-      fail(caught, "We couldn't save those changes.");
-      return false;
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function saveChoices(values: Parameters<typeof saveWebsiteChoices>[0]): Promise<boolean> {
-    setBusy(true);
-    setError(null);
-    try {
-      setJob(await saveWebsiteChoices(values));
-      return true;
-    } catch (caught) {
-      fail(caught, "We couldn't save that.");
-      return false;
     } finally {
       setBusy(false);
     }
@@ -328,24 +286,43 @@ export function WebsiteWizard({
     }
   }
 
+  /**
+   * The only write in the whole flow, apart from the crawl itself.
+   *
+   * Every screen is sent here together, which is what makes abandoning the
+   * wizard cost nothing: until this button, the review, the questions, the
+   * voice and the greeting exist only in this component.
+   */
   async function create() {
+    if (!knowledge) return;
     setBusy(true);
     setError(null);
     try {
-      const saved = await saveChoices({
-        business_type: businessType,
-        greeting_style: greetingStyle,
-        custom_greeting: greeting,
-        voice_id: voiceId,
-        recording_acknowledged: recordingAck,
-        area_code: areaCode,
-        selected_number: selectedNumber,
-        contact_phone: phone,
-        notification_email: email,
-        full_name: fullName,
+      await confirmWebsiteSetup({
+        knowledge: {
+          business_name: knowledge.business_name,
+          business_summary: knowledge.business_summary,
+          operating_hours: knowledge.operating_hours,
+          services: knowledge.services,
+          items: knowledge.items,
+          questions: knowledge.questions,
+          sms_templates: knowledge.sms_templates,
+        },
+        choices: {
+          business_type: businessType,
+          greeting_style: greetingStyle,
+          custom_greeting: greeting,
+          voice_id: voiceId,
+          language: "en",
+          recording_acknowledged: recordingAck,
+          area_code: areaCode,
+          selected_number: selectedNumber,
+          contact_phone: phone,
+          notification_email: email,
+          full_name: fullName,
+          heard_about: heardAbout,
+        },
       });
-      if (!saved) return;
-      await confirmWebsiteSetup();
       router.push("/dashboard/setup");
     } catch (caught) {
       fail(caught, "We couldn't create your receptionist.");
@@ -354,10 +331,34 @@ export function WebsiteWizard({
     }
   }
 
-  function back() {
+  /** Leaving for the manual form. Same rule as Back: nothing is left behind. */
+  async function switchToManual() {
+    try {
+      await discardWebsiteSetup();
+    } catch {
+      // They are leaving either way.
+    }
+    setJob(null);
+    onSwitchToManual();
+  }
+
+  async function back() {
     const previous = PREVIOUS[step];
-    if (previous === "leave") onLeave();
-    else setStep(previous);
+    if (previous !== "leave") {
+      setStep(previous);
+      return;
+    }
+    // Out of the flow entirely, so nothing of this attempt is left behind: the
+    // crawl is the one thing that was written, and it goes too. Reported but
+    // never blocking — a discard that fails must not trap someone in a wizard
+    // they are trying to leave.
+    try {
+      await discardWebsiteSetup();
+    } catch {
+      // Nothing to tell the customer: they asked to leave, and they are leaving.
+    }
+    setJob(null);
+    onLeave();
   }
 
   async function next(event: FormEvent) {
@@ -382,16 +383,18 @@ export function WebsiteWizard({
       await begin();
       return;
     }
+    // Steps 3 to 6 move on without touching the server. Everything the customer
+    // decides is held here and sent once, by `create`.
     if (step === 3 && knowledge) {
-      if (await saveKnowledge(knowledge)) setStep(4);
+      setStep(4);
       return;
     }
     if (step === 4 && knowledge) {
-      if (await saveKnowledge(knowledge)) setStep(5);
+      setStep(5);
       return;
     }
     if (step === 5) {
-      if (await saveChoices({ voice_id: voiceId, language: "en" })) setStep(6);
+      setStep(6);
       return;
     }
     if (step === 6) {
@@ -399,16 +402,7 @@ export function WebsiteWizard({
         setFieldErrors({ custom_greeting: "Your receptionist needs an opening line." });
         return;
       }
-      if (
-        await saveChoices({
-          custom_greeting: greeting,
-          greeting_style: greetingStyle,
-          business_type: businessType,
-          recording_acknowledged: recordingAck,
-        })
-      ) {
-        setStep(7);
-      }
+      setStep(7);
       return;
     }
     if (step === LAST_STEP) {
@@ -483,7 +477,7 @@ export function WebsiteWizard({
                 </span>
                 <button
                   type="button"
-                  onClick={onSwitchToManual}
+                  onClick={() => void switchToManual()}
                   className="rounded-lg px-4 py-2 text-center text-sm font-medium text-muted hover:text-ink"
                 >
                   Set up manually
@@ -507,7 +501,7 @@ export function WebsiteWizard({
           )}
 
           {step === 2 && (
-            <Reading job={job} failed={failed} busy={busy} onRetry={retry} onManual={onSwitchToManual} />
+            <Reading job={job} failed={failed} busy={busy} onRetry={retry} onManual={() => void switchToManual()} />
           )}
 
           {step === 3 && knowledge && (
@@ -602,7 +596,7 @@ export function WebsiteWizard({
           <Button
             variant="secondary"
             leadingIcon={<ArrowLeftIcon size={16} />}
-            onClick={back}
+            onClick={() => void back()}
             disabled={busy}
           >
             Back

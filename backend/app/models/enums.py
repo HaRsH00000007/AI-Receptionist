@@ -459,6 +459,12 @@ class AuditAction(StrEnum):
     CONTACT_BLOCKED = "contact_blocked"
     CONTACT_UNBLOCKED = "contact_unblocked"
     CONTACTS_IMPORTED = "contacts_imported"
+    TRANSFER_RULE_CREATED = "transfer_rule_created"
+    TRANSFER_RULE_UPDATED = "transfer_rule_updated"
+    TRANSFER_RULE_DELETED = "transfer_rule_deleted"
+    GREETING_RULE_CREATED = "greeting_rule_created"
+    GREETING_RULE_UPDATED = "greeting_rule_updated"
+    GREETING_RULE_DELETED = "greeting_rule_deleted"
 
     PROVISIONING_STARTED = "provisioning_started"
     PROVISIONING_RETRIED = "provisioning_retried"
@@ -584,6 +590,46 @@ class ContactSource(StrEnum):
     MANUAL = "manual"
     CALL = "call"
     IMPORT = "import"
+
+
+class TransferType(StrEnum):
+    """How a live call is handed to a person.
+
+    Two words a business understands, mapped to the vendor's own names where
+    the call is actually handed over (``app.providers.real.voice``):
+
+    * ``WARM`` — the person is dialled, told who is calling and why, and only
+      then joined to the caller. ElevenLabs calls this a *conference* transfer.
+    * ``COLD`` — the call goes straight through with the caller's own number as
+      the caller ID, and nobody is briefed. ElevenLabs calls this *blind*.
+
+    SIP REFER, the vendor's third type, is deliberately absent: it needs a SIP
+    trunk that permits REFER, and this product hands every number to ElevenLabs
+    through Twilio.
+    """
+
+    WARM = "warm"
+    COLD = "cold"
+
+
+class GreetingScheduleKind(StrEnum):
+    """Which calendar a scheduled greeting is read against.
+
+    Two kinds because businesses describe their exceptions in two different
+    ways, and collapsing them into one would make the common cases awkward:
+
+    * ``WEEKLY`` — "every weekday between noon and one". Stored as weekdays
+      plus a window of minutes, and it repeats forever.
+    * ``DATED`` — "the 24th to the 26th of December". Stored as a date range,
+      and it stops being true once the dates pass.
+
+    A dated rule outranks a weekly one when both match, because a one-off
+    closure is the more specific statement; see
+    :mod:`app.services.greeting_schedule`.
+    """
+
+    WEEKLY = "weekly"
+    DATED = "dated"
 
 
 class WebsiteOnboardingStatus(StrEnum):

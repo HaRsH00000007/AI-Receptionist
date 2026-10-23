@@ -173,6 +173,22 @@ on someone remembering to deploy a scheduler:
 Both are logged and audited. Both swallow their own failures, because a
 retention problem must not stop the worker summarizing calls and sending mail.
 
+One more runs on **every tick**, not on that cadence:
+
+* **Scheduled greetings** — compares the opening line each business's voice
+  agent is holding against the one its rules say applies right now, and pushes
+  when they differ (`app/services/greeting_sync.py`). Every tick because this
+  is the only thing here whose right answer changes with the clock alone: a
+  lunch-hour greeting that arrives forty minutes into lunch is worse than not
+  offering the feature. It costs one indexed `EXISTS` when no business has a
+  rule, and makes no vendor call unless something actually changed.
+
+  If scheduled greetings stop switching, the worker is the thing to look at —
+  nothing else moves them. `agents.greeting_in_effect` records what the vendor
+  was last told; a row whose value disagrees with the business's rules is a
+  sweep that is not running or not succeeding, and the log line is
+  `could not switch a scheduled greeting`.
+
 ---
 
 ## 8. Backups and restore

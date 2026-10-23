@@ -12,6 +12,10 @@ import type {
   AgentConfigView,
   AgentSettingsUpdate,
   TimezoneOptionView,
+  TransferRuleInput,
+  TransferRulePatch,
+  TransferRuleResult,
+  TransferRulesView,
   AgentUpdateResult,
   AgentView,
   ApiErrorBody,
@@ -25,6 +29,10 @@ import type {
   ContactPatch,
   ContactView,
   DashboardSummaryView,
+  GreetingRuleInput,
+  GreetingRulePatch,
+  GreetingRuleResult,
+  GreetingRulesView,
   IntegrationCheckView,
   IntegrationListView,
   IntegrationView,
@@ -46,6 +54,7 @@ import type {
   UsageView,
   VoiceOptionView,
   WebsiteChoicesUpdate,
+  WebsiteConfirm,
   WebsiteKnowledgeUpdate,
   WebsiteSetupStart,
   WebsiteSetupView,
@@ -395,6 +404,81 @@ export function updateAgentSettings(
   return send<AgentUpdateResult>(`${tenantId}/agent/settings`, "PUT", settings);
 }
 
+/**
+ * The rules that send a call to a person.
+ *
+ * Every write returns the whole list plus what publishing it did, because a
+ * rule change republishes the configuration and pushes it to the voice agent:
+ * `synced: false` means the rule is saved and the agent is still handling calls
+ * the previous way, which for a deleted rule means callers may still be
+ * transferred. Show `detail` rather than inventing a message.
+ */
+export function listTransferRules(tenantId: string): Promise<TransferRulesView> {
+  return portal<TransferRulesView>(`${tenantId}/agent/transfer-rules`);
+}
+
+export function createTransferRule(
+  tenantId: string,
+  input: TransferRuleInput,
+): Promise<TransferRuleResult> {
+  return send<TransferRuleResult>(`${tenantId}/agent/transfer-rules`, "POST", input);
+}
+
+export function updateTransferRule(
+  tenantId: string,
+  ruleId: string,
+  patch: TransferRulePatch,
+): Promise<TransferRuleResult> {
+  return send<TransferRuleResult>(`${tenantId}/agent/transfer-rules/${ruleId}`, "PATCH", patch);
+}
+
+/** Returns the remaining rules, so the page can say whether it took effect. */
+export function deleteTransferRule(
+  tenantId: string,
+  ruleId: string,
+): Promise<TransferRuleResult> {
+  return portal<TransferRuleResult>(`${tenantId}/agent/transfer-rules/${ruleId}`, {
+    method: "DELETE",
+  });
+}
+
+/**
+ * The greetings that replace the usual one on a schedule.
+ *
+ * Every write returns the whole list plus what publishing it did, for the same
+ * reason the transfer rules do: the rule is saved the moment it returns, and
+ * `synced: false` means the voice agent is still answering with the previous
+ * opening line. Show `detail` rather than inventing a message.
+ */
+export function listGreetingRules(tenantId: string): Promise<GreetingRulesView> {
+  return portal<GreetingRulesView>(`${tenantId}/agent/greeting-rules`);
+}
+
+export function createGreetingRule(
+  tenantId: string,
+  input: GreetingRuleInput,
+): Promise<GreetingRuleResult> {
+  return send<GreetingRuleResult>(`${tenantId}/agent/greeting-rules`, "POST", input);
+}
+
+export function updateGreetingRule(
+  tenantId: string,
+  ruleId: string,
+  patch: GreetingRulePatch,
+): Promise<GreetingRuleResult> {
+  return send<GreetingRuleResult>(`${tenantId}/agent/greeting-rules/${ruleId}`, "PATCH", patch);
+}
+
+/** Returns the remaining rules, so the page can say which greeting is live. */
+export function deleteGreetingRule(
+  tenantId: string,
+  ruleId: string,
+): Promise<GreetingRuleResult> {
+  return portal<GreetingRuleResult>(`${tenantId}/agent/greeting-rules/${ruleId}`, {
+    method: "DELETE",
+  });
+}
+
 export function retryProvisioning(tenantId: string): Promise<RetryResult> {
   return send<RetryResult>(`${tenantId}/provisioning/retry`, "POST");
 }
@@ -733,11 +817,16 @@ export function retryWebsiteSetup(): Promise<WebsiteSetupView> {
 /**
  * Create the business from the reviewed draft. The only call here that
  * provisions anything, and the only one that can spend money.
+ *
+ * It carries every screen of the wizard, because the wizard saves nothing as
+ * it goes: abandoning it half way should leave nothing behind. The payload is
+ * optional only so a repeat of an already-created setup still works.
  */
-export function confirmWebsiteSetup(): Promise<SignupResponse> {
+export function confirmWebsiteSetup(payload?: WebsiteConfirm): Promise<SignupResponse> {
   return request<SignupResponse>("/api/v1/website-setup/confirm", {
     ...withCredentials,
     method: "POST",
+    body: JSON.stringify(payload ?? {}),
   });
 }
 

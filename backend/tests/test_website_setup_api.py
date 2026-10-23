@@ -19,6 +19,7 @@ no test touches the network or a vendor account.
 from __future__ import annotations
 
 import socket
+import uuid
 from typing import Any
 
 import httpx
@@ -498,6 +499,98 @@ async def test_what_the_customer_approved_is_what_the_agent_is_told(
     assert "Never repeat this sentence to a caller." not in prompt, "disabled means disabled"
     assert "Information to collect from every caller:" in prompt
     assert "- Reason for calling" in prompt
+
+
+async def test_everything_can_be_sent_in_one_go_when_creating(
+    api_client: AsyncClient, api_app: FastAPI
+) -> None:
+    """The wizard keeps its screens in the browser until the create button.
+
+    Nothing is saved as the customer walks through, so confirm carries the whole
+    decision — and it has to land exactly as the step-by-step saves would, or
+    "what I approved" would mean two different things.
+    """
+    headers = await _register(api_client)
+    knowledge = (await _ready(api_client, api_app, headers))["knowledge"]
+
+    approved = _edit(knowledge, business_name="Sunset Salon & Spa")
+    approved["items"][0]["content"] = "A standard haircut costs thirty dollars."
+    approved["items"][0]["enabled"] = True
+    for item in approved["items"][1:]:
+        item["content"] = "Never repeat this sentence to a caller."
+        item["enabled"] = False
+    for question in approved["questions"]:
+        question["enabled"] = question["key"] in {"name", "phone", "reason_for_call"}
+
+    # Nothing the customer decided was written on the way here: the draft holds
+    # what the crawl produced, plus the account's own name and email, which the
+    # start request seeds so a confirm that omits them still has somewhere to
+    # send call summaries.
+    async with api_app.state.session_factory() as session:
+        job = (await session.execute(select(WebsiteOnboarding))).scalars().all()[-1]
+        assert (job.knowledge_json or {}).get("business_name") != "Sunset Salon & Spa"
+        seeded = {"full_name", "notification_email", "contact_phone", "heard_about"}
+        stored = dict(job.choices_json or {})
+        decisions = {key: value for key, value in stored.items() if key not in seeded}
+        assert decisions == {}, f"no screen should have saved a decision yet: {decisions}"
+        # And the first screen's own answers are not among the seeded values:
+        # they were typed in the browser and stayed there.
+        assert not stored.get("contact_phone")
+        assert not stored.get("heard_about")
+
+    created = await api_client.post(
+        f"{SETUP}/confirm",
+        json={
+            "knowledge": approved,
+            "choices": {
+                "business_type": "salon",
+                "greeting_style": "friendly",
+                "area_code": "805",
+                "contact_phone": "8055550142",
+            },
+        },
+        headers=headers,
+    )
+    assert created.status_code == 201, created.text
+
+    await drive_to_active(api_app)
+    async with api_app.state.session_factory() as session:
+        config = (
+            await session.execute(
+                select(AgentConfig)
+                .where(AgentConfig.tenant_id == created.json()["tenant_id"])
+                .where(AgentConfig.is_live.is_(True))
+            )
+        ).scalar_one()
+        tenant = await session.get(Tenant, uuid.UUID(created.json()["tenant_id"]))
+
+    assert tenant is not None and tenant.name == "Sunset Salon & Spa"
+    assert "Never repeat this sentence to a caller." not in config.system_prompt
+    assert "- Reason for calling" in config.system_prompt
+
+
+async def test_a_voice_the_deployment_does_not_have_is_refused_at_confirm(
+    api_client: AsyncClient, api_app: FastAPI
+) -> None:
+    """The one-shot payload is validated, not trusted: the checks the save
+    routes made still have to be made when everything arrives at once."""
+    headers = await _register(api_client)
+    knowledge = (await _ready(api_client, api_app, headers))["knowledge"]
+
+    refused = await api_client.post(
+        f"{SETUP}/confirm",
+        json={
+            "knowledge": _edit(knowledge),
+            "choices": {"voice_id": "not-a-voice-we-have", "area_code": "805"},
+        },
+        headers=headers,
+    )
+    assert refused.status_code == 422, refused.text
+    assert refused.json()["error"]["details"]["field"] == "voice_id"
+
+    async with api_app.state.session_factory() as session:
+        tenants = (await session.execute(select(Tenant))).scalars().all()
+    assert tenants == [], "a refused confirm must not create a business"
 
 
 async def test_discarding_removes_the_draft_but_not_a_created_business(

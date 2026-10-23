@@ -127,7 +127,24 @@ class ChoicesUpdate(StrictInput):
     notification_email: EmailStr | None = None
     contact_phone: str = Field(default="", max_length=32)
     full_name: str = Field(default="", max_length=120)
+    #: "How did you hear about us?" — asked on the first screen and carried
+    #: here, because the first screen is no longer saved on its way past.
+    heard_about: str = Field(default="", max_length=200)
     plan: str = Field(default="", max_length=32)
+
+
+class ConfirmRequest(StrictInput):
+    """Everything the customer decided, sent in one go when they create.
+
+    The wizard keeps its screens in the browser and posts them here, so a draft
+    that is abandoned half way leaves nothing behind but the crawl it already
+    paid for. Both halves are optional: a client that saved as it went (or a
+    repeat of an already-confirmed request) sends neither, and the stored draft
+    is used exactly as before.
+    """
+
+    knowledge: KnowledgeUpdate | None = None
+    choices: ChoicesUpdate | None = None
 
 
 # ---------------------------------------------------------------------------

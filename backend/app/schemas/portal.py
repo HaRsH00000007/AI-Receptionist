@@ -127,6 +127,15 @@ class AgentSettingsUpdate(BaseModel):
     custom_greeting: str = Field(default="", max_length=300)
     escalation_rules: str = Field(default="", max_length=2000)
 
+    #: The sign-off, spoken as the call ends. ``None`` leaves it alone and ""
+    #: removes it.
+    #:
+    #: Optional rather than defaulted to "", unlike ``custom_greeting`` above,
+    #: because the Training panel sends this shape without it — and a default
+    #: of "" there would quietly delete a sign-off every time somebody edited
+    #: their opening hours.
+    custom_goodbye: str | None = Field(default=None, max_length=300)
+
     #: The owner's own label for the receptionist. Blank clears it.
     #:
     #: Optional so a client written before this field existed still validates;
@@ -164,6 +173,14 @@ class AgentSettingsUpdate(BaseModel):
         from app.services.normalization import normalize_greeting
 
         return normalize_greeting(value)
+
+    @field_validator("custom_goodbye")
+    @classmethod
+    def _goodbye_is_speakable(cls, value: str | None) -> str | None:
+        """Normalized the same way as the opening line: both are spoken."""
+        from app.services.normalization import normalize_greeting
+
+        return None if value is None else normalize_greeting(value)
 
     @field_validator("agent_name")
     @classmethod

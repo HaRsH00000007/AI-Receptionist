@@ -304,6 +304,14 @@ export interface BusinessProfileView {
    * write one. Distinct from `greeting`, which is whatever is live right now.
    */
   custom_greeting: string | null;
+  /**
+   * The sign-off the owner wrote, or null if they have not written one.
+   *
+   * Unlike the opening line, this is an instruction in the prompt rather than a
+   * field the voice vendor speaks — an agent has a first message and no last
+   * one — so it is followed rather than read out word for word.
+   */
+  custom_goodbye: string | null;
   escalation_raw: string | null;
   escalation: EscalationPolicy | null;
   /** The live opening line callers hear, once a configuration is live. */
@@ -537,6 +545,8 @@ export interface AgentSettingsUpdate {
   operating_hours: string;
   greeting_style: GreetingStyle;
   custom_greeting: string;
+  /** Omit to leave the sign-off alone; "" removes it. */
+  custom_goodbye?: string;
   escalation_rules: string;
   /**
    * The owner's label for the receptionist. Omit to leave it alone; "" clears
@@ -546,6 +556,147 @@ export interface AgentSettingsUpdate {
   agent_name?: string;
   /** IANA name, and only one the server offers. Omit to leave it alone. */
   timezone?: string;
+}
+
+/**
+ * How a live call is handed to a person.
+ *
+ * Two words a business understands, mapped where the handover actually happens
+ * to the voice vendor's own names: an announced transfer is a conference with a
+ * briefing, a straight-through one is blind.
+ */
+export type TransferType = "warm" | "cold";
+
+/** One rule: if a caller says this, ring that number. */
+export interface TransferRuleView {
+  id: string;
+  /** The business's own name for the rule. Callers never hear it. */
+  label: string | null;
+  destination_e164: string;
+  /** When to use this rule, in the business's words. The agent reads it. */
+  condition: string;
+  transfer_type: TransferType;
+  /** Off keeps the rule on file and takes it off the agent. */
+  enabled: boolean;
+  position: number;
+  created_at: string;
+}
+
+export interface TransferRulesView {
+  rules: TransferRuleView[];
+  max_rules: number;
+  /**
+   * Whether a blind transfer is possible on this deployment. It needs the
+   * number to have been imported into the voice vendor from Twilio natively;
+   * where it was not, only warm transfers work and the form says so.
+   */
+  cold_transfer_available: boolean;
+}
+
+/** The rules after a change, and what publishing them did. */
+export interface TransferRuleResult extends TransferRulesView {
+  /** Null when there was no live configuration to publish to yet. */
+  config_version: number | null;
+  /** False when the rule is saved but the voice agent is not updated yet. */
+  synced: boolean;
+  detail: string;
+}
+
+export interface TransferRuleInput {
+  /** Any shape a person types; stored in E.164. */
+  destination_number: string;
+  condition: string;
+  label?: string;
+  transfer_type?: TransferType;
+  enabled?: boolean;
+}
+
+/** An edit. An omitted field is left alone; "" clears the label. */
+export interface TransferRulePatch {
+  destination_number?: string;
+  condition?: string;
+  label?: string;
+  transfer_type?: TransferType;
+  enabled?: boolean;
+}
+
+/**
+ * Which calendar a scheduled greeting is read against.
+ *
+ * `weekly` repeats forever and is described in weekdays and clock times;
+ * `dated` is a one-off and is described in calendar dates. A dated rule wins
+ * when both match, because a one-off closure is the more specific statement.
+ */
+export type GreetingRuleKind = "weekly" | "dated";
+
+/** One exception: say this instead, between these times or on these dates. */
+export interface GreetingRuleView {
+  id: string;
+  kind: GreetingRuleKind;
+  /** Spoken to the caller verbatim, like the default opening line. */
+  message: string;
+  /** Weekly only. Monday is 0, matching the server. Empty means every day. */
+  weekdays: number[];
+  /** Minutes since local midnight. Null on an all-day dated rule. */
+  start_minute: number | null;
+  end_minute: number | null;
+  /** Dated only, inclusive at both ends, as `YYYY-MM-DD`. */
+  start_date: string | null;
+  end_date: string | null;
+  /** Off keeps the wording on file and stops it being spoken. */
+  enabled: boolean;
+  position: number;
+  created_at: string;
+}
+
+export interface GreetingRulesView {
+  rules: GreetingRuleView[];
+  max_rules: number;
+  /**
+   * The business's own zone, which every rule is read against. The same one
+   * the opening hours are stored in, changed on this same settings page.
+   */
+  timezone: string;
+  /** What callers hear when no rule matches, which is almost every call. */
+  default_greeting: string | null;
+  /** What a call arriving right now would be answered with. */
+  active_message: string | null;
+}
+
+/** The rules after a change, and what publishing them did. */
+export interface GreetingRuleResult extends GreetingRulesView {
+  /** Null when there was no live configuration to publish to yet. */
+  config_version: number | null;
+  /** False when the rule is saved but the voice agent still has the old line. */
+  synced: boolean;
+  detail: string;
+}
+
+export interface GreetingRuleInput {
+  kind: GreetingRuleKind;
+  message: string;
+  weekdays?: number[];
+  start_minute?: number | null;
+  end_minute?: number | null;
+  start_date?: string | null;
+  end_date?: string | null;
+  enabled?: boolean;
+}
+
+/**
+ * An edit. An omitted field is left alone.
+ *
+ * `kind` is absent on purpose: a weekly rule cannot become a dated one, because
+ * changing which calendar it is read against changes every field on it.
+ */
+export interface GreetingRulePatch {
+  message?: string;
+  weekdays?: number[];
+  start_minute?: number | null;
+  end_minute?: number | null;
+  start_date?: string | null;
+  end_date?: string | null;
+  enabled?: boolean;
 }
 
 /** One timezone a business may pick, as the server offers it. */
@@ -809,4 +960,18 @@ export interface WebsiteChoicesUpdate {
   contact_phone?: string;
   full_name?: string;
   plan?: Plan;
+  /** Where they heard about us. Collected on the first screen. */
+  heard_about?: string;
+}
+
+/**
+ * Everything the customer decided, sent in one request when they create.
+ *
+ * The wizard keeps its screens in the browser until then, so an abandoned
+ * setup leaves nothing behind but the crawl. Both halves are optional: a repeat
+ * of an already-confirmed request sends neither.
+ */
+export interface WebsiteConfirm {
+  knowledge?: WebsiteKnowledgeUpdate;
+  choices?: WebsiteChoicesUpdate;
 }

@@ -69,10 +69,8 @@ export const AGENT_SECTIONS: readonly AgentSection[] = [
     id: "transfer",
     icon: PhoneForwardIcon,
     label: "Transfer calls",
-    built: false,
-    summary:
-      "Hand a caller to a real person, and decide who and when. Today the receptionist can be told in its escalation rules to offer a transfer, but there is no number to transfer to and no telephony behind it.",
-    elsewhere: { label: "Escalation rules", href: "/dashboard/agent?section=training" },
+    built: true,
+    summary: "Who a caller is handed to when they need a person, and when that happens.",
   },
   {
     id: "texts",

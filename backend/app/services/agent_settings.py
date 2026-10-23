@@ -203,6 +203,14 @@ class AgentSettingsService:
             profile.greeting_custom = greeting
             changed.append("custom_greeting")
 
+        # ``None`` means the client did not mention it — the Training panel
+        # never does — and must not be read as "remove the sign-off".
+        if update.custom_goodbye is not None:
+            goodbye = update.custom_goodbye or None
+            if goodbye != profile.goodbye_custom:
+                profile.goodbye_custom = goodbye
+                changed.append("custom_goodbye")
+
         rules = update.escalation_rules or None
         if rules != profile.escalation_raw:
             profile.escalation_raw = rules

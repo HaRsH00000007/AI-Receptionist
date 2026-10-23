@@ -48,6 +48,12 @@ class RoutingInput:
     tenant_status: TenantStatus | None
     agent_id: str | None
     business_name: str | None
+    #: The business's own clock, for reading its scheduled greetings against.
+    #:
+    #: Defaulted rather than required because no routing *decision* depends on
+    #: it — it is carried for the greeting, and the dispositions below would be
+    #: identical without it.
+    timezone: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

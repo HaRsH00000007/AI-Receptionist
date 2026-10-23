@@ -60,6 +60,19 @@ class BusinessProfile(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     #: in the register the owner asked for.
     greeting_custom: Mapped[str | None] = mapped_column(Text, nullable=True)
 
+    #: What the receptionist says as it signs off, used verbatim.
+    #:
+    #: ``None`` means "no sign-off of your own", and the agent ends the call the
+    #: way its prompt otherwise tells it to.
+    #:
+    #: Unlike the opening line, this is **not** a field the vendor has: there is
+    #: no "last message" on an ElevenLabs agent, so it is rendered into the
+    #: system prompt as an instruction to close with these words
+    #: (``render_system_prompt``). A model following an instruction is a weaker
+    #: promise than a first message it is given to read, and the UI says so
+    #: rather than implying the two behave the same.
+    goodbye_custom: Mapped[str | None] = mapped_column(Text, nullable=True)
+
     escalation_raw: Mapped[str | None] = mapped_column(Text, nullable=True)
     escalation_json: Mapped[dict[str, Any] | None] = mapped_column(nullable=True)
 

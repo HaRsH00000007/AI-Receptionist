@@ -20,7 +20,7 @@ import { Button } from "@/components/ui/Button";
 import { LogoMark } from "@/components/ui/Logo";
 import { Spinner } from "@/components/ui/Spinner";
 import { ApiError, getSessionOrNull } from "@/lib/api";
-import { ONBOARDING_PATH, workableMemberships } from "@/lib/routing";
+import { NEW_BUSINESS_PATH, ONBOARDING_PATH, workableMemberships } from "@/lib/routing";
 import type { SessionView } from "@/lib/types";
 
 import { TenantWorkspace } from "./TenantWorkspace";
@@ -64,10 +64,26 @@ export function DashboardGate({ children }: { children: ReactNode }) {
     state.status === "signed_in" &&
     workableMemberships(state.session.memberships).length === 0;
 
+  /**
+   * Which door into the setup form, and the difference is load-bearing.
+   *
+   * An account with *no* memberships gets the plain form, which resumes its
+   * saved draft. An account whose businesses are all cancelled still has
+   * memberships, and the form sends anyone with a membership back to the
+   * dashboard — which sends them here again. That is a redirect loop with no
+   * way out of it: the two pages flicker and nothing ever renders. `another=1`
+   * is the deliberate door `lib/routing.ts` keeps for exactly this person, so
+   * use it rather than bouncing them.
+   */
+  const onboardingTarget =
+    state.status === "signed_in" && state.session.memberships.length > 0
+      ? NEW_BUSINESS_PATH
+      : ONBOARDING_PATH;
+
   useEffect(() => {
     if (state.status === "signed_out") router.replace("/login");
-    else if (needsOnboarding) router.replace(ONBOARDING_PATH);
-  }, [state.status, needsOnboarding, router]);
+    else if (needsOnboarding) router.replace(onboardingTarget);
+  }, [state.status, needsOnboarding, onboardingTarget, router]);
 
   const onSignedOut = useCallback(() => setState({ status: "signed_out" }), []);
 
@@ -109,8 +125,11 @@ export function DashboardGate({ children }: { children: ReactNode }) {
 
   const { session } = state;
 
-  if (session.memberships.length === 0) {
-    // The effect above is taking them to the setup form.
+  if (needsOnboarding) {
+    // The effect above is taking them to the setup form. Nothing tenant-shaped
+    // is mounted meanwhile: an account with only cancelled businesses would
+    // otherwise open one of them and sit on "Loading your receptionist…"
+    // behind the redirect.
     return (
       <CenteredPanel>
         <Spinner className="size-5 text-accent" />

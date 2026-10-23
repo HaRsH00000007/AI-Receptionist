@@ -32,6 +32,7 @@ from app.models.enums import AgentMode, AgentStatus
 from app.provisioning.context import StepContext, StepResult
 from app.services.idempotency import tenant_resource_name
 from app.services.shared_agents import effective_agent_mode, resolve_shared_agent
+from app.services.transfer_targets import targets_of_config
 
 logger = get_logger(__name__)
 
@@ -87,6 +88,12 @@ async def run(ctx: StepContext) -> StepResult:
             system_prompt=config.system_prompt,
             first_message=config.first_message,
             voice_id=config.voice_id or ctx.settings.elevenlabs_default_voice_id,
+            # Empty for a new tenant — transfer rules cannot be written until
+            # setup has finished — and passed anyway so that "push our config"
+            # means the same thing here as everywhere else. An adopted agent
+            # left over from a dead attempt is reset to what we believe,
+            # destinations included, rather than keeping whatever it held.
+            transfers=targets_of_config(config.model_params_json),
         )
         source = "vendor"
     else:
@@ -95,6 +102,7 @@ async def run(ctx: StepContext) -> StepResult:
             system_prompt=config.system_prompt,
             first_message=config.first_message,
             voice_id=config.voice_id or ctx.settings.elevenlabs_default_voice_id,
+            transfers=targets_of_config(config.model_params_json),
         )
         source = "created"
 

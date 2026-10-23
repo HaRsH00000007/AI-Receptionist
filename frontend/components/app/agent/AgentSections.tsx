@@ -8,14 +8,16 @@
  * link can still open the one that matters. The nav is a real list of links
  * for the same reason: middle-click and "open in new tab" work.
  *
- * Every section in the reference design is listed, including the seven that
- * are not built. See `sections.ts` for why.
+ * Every section in the reference design is listed, including the ones that are
+ * not built. See `sections.ts` for why.
  */
 
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 
 import { AgentGeneral } from "@/components/app/agent/AgentGeneral";
+import { AgentGreetings } from "@/components/app/agent/AgentGreetings";
+import { AgentTransfers } from "@/components/app/agent/AgentTransfers";
 import { AGENT_SECTIONS, sectionFor, type AgentSection } from "@/components/app/agent/sections";
 import { useTenantData } from "@/components/app/TenantWorkspace";
 import { AgentView } from "@/components/app/views/AgentView";
@@ -60,7 +62,18 @@ function NotBuilt({ section }: { section: AgentSection }) {
 
 function Panel({ section }: { section: AgentSection }) {
   if (!section.built) return <NotBuilt section={section} />;
-  if (section.id === "general") return <AgentGeneral />;
+  if (section.id === "general") {
+    // Two components, one panel, and siblings rather than nested: the settings
+    // above are a single form with one save, while each scheduled greeting
+    // saves on its own — and a form inside a form is not valid HTML.
+    return (
+      <div className="space-y-6">
+        <AgentGeneral />
+        <AgentGreetings />
+      </div>
+    );
+  }
+  if (section.id === "transfer") return <AgentTransfers />;
   // Training is the existing agent page: what the receptionist knows, the
   // conversation preview, version history and the danger zone. Reused whole
   // rather than reimplemented beside it.

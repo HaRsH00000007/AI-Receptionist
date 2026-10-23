@@ -267,3 +267,78 @@ async def test_a_member_cannot_rename_the_agent_or_move_its_timezone(
 
     profile = await _profile(api_app, owner.tenant_id)
     assert profile.agent_name is None
+
+
+# ---------------------------------------------------------------------------
+# The sign-off
+# ---------------------------------------------------------------------------
+
+
+async def test_a_sign_off_is_rendered_into_the_prompt_as_an_instruction(
+    api_client: AsyncClient, api_app: FastAPI
+) -> None:
+    """There is no "last message" on a voice agent, so this is an instruction.
+
+    Asserted on the published prompt rather than on the profile column: the
+    column only matters because the prompt carries it, and a sign-off stored
+    but never rendered would be a field that quietly does nothing.
+    """
+    owner = await live_owner(api_client, api_app)
+
+    response = await _save(
+        api_client, owner, _edit(custom_goodbye="Thanks for calling. Have a great day.")
+    )
+
+    assert response.status_code == 200, response.text
+    profile = await _profile(api_app, owner.tenant_id)
+    assert profile.goodbye_custom == "Thanks for calling. Have a great day."
+    async with api_app.state.session_factory() as session:
+        config = (
+            await session.execute(
+                select(AgentConfig)
+                .where(AgentConfig.tenant_id == owner.tenant_id)
+                .where(AgentConfig.is_live.is_(True))
+            )
+        ).scalar_one()
+    assert "Thanks for calling. Have a great day." in config.system_prompt
+    assert "Ending the call:" in config.system_prompt
+    # And not as the opening line, which is the thing it is easiest to confuse
+    # it with — the greeting is read verbatim, this is followed.
+    assert "Have a great day." not in config.first_message
+
+
+async def test_a_save_that_does_not_mention_the_sign_off_keeps_it(
+    api_client: AsyncClient, api_app: FastAPI
+) -> None:
+    """The Training panel sends this shape without the field.
+
+    If an absent value meant "" the sign-off would be deleted every time
+    somebody edited their opening hours from the other panel.
+    """
+    owner = await live_owner(api_client, api_app)
+    await _save(api_client, owner, _edit(custom_goodbye="Goodbye for now."))
+
+    response = await _save(api_client, owner, _edit(services="cuts, color, blowouts, braids"))
+
+    assert response.status_code == 200, response.text
+    assert (await _profile(api_app, owner.tenant_id)).goodbye_custom == "Goodbye for now."
+
+
+async def test_an_empty_sign_off_removes_it(api_client: AsyncClient, api_app: FastAPI) -> None:
+    """Explicitly "" is the only way to clear it, and it clears the prompt too."""
+    owner = await live_owner(api_client, api_app)
+    await _save(api_client, owner, _edit(custom_goodbye="Goodbye for now."))
+
+    response = await _save(api_client, owner, _edit(custom_goodbye=""))
+
+    assert response.status_code == 200, response.text
+    assert (await _profile(api_app, owner.tenant_id)).goodbye_custom is None
+    async with api_app.state.session_factory() as session:
+        config = (
+            await session.execute(
+                select(AgentConfig)
+                .where(AgentConfig.tenant_id == owner.tenant_id)
+                .where(AgentConfig.is_live.is_(True))
+            )
+        ).scalar_one()
+    assert "Ending the call:" not in config.system_prompt

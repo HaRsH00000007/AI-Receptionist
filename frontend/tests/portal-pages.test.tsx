@@ -13,6 +13,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { TenantWorkspace } from "@/components/app/TenantWorkspace";
 import { AgentGeneral } from "@/components/app/agent/AgentGeneral";
+import { AgentGreetings } from "@/components/app/agent/AgentGreetings";
+import { AgentTransfers } from "@/components/app/agent/AgentTransfers";
 import { AgentView } from "@/components/app/views/AgentView";
 import { ContactsView } from "@/components/app/views/ContactsView";
 import { IntegrationsView } from "@/components/app/views/IntegrationsView";
@@ -22,9 +24,13 @@ import { ToastProvider } from "@/components/ui/Toast";
 import type {
   ContactListView,
   ContactView,
+  GreetingRuleResult,
+  GreetingRuleView,
   IntegrationView,
   SessionView,
   SmsStateView,
+  TransferRuleResult,
+  TransferRuleView,
 } from "@/lib/types";
 
 const navigation = vi.hoisted(() => ({
@@ -60,6 +66,14 @@ vi.mock("@/lib/api", async () => {
     submitSmsRegistration: vi.fn(),
     listConfigVersions: vi.fn(),
     listTimezones: vi.fn(),
+    listGreetingRules: vi.fn(),
+    createGreetingRule: vi.fn(),
+    updateGreetingRule: vi.fn(),
+    deleteGreetingRule: vi.fn(),
+    listTransferRules: vi.fn(),
+    createTransferRule: vi.fn(),
+    updateTransferRule: vi.fn(),
+    deleteTransferRule: vi.fn(),
     updateAgentSettings: vi.fn(),
     deleteReceptionist: vi.fn(),
     listContacts: vi.fn(),
@@ -204,6 +218,7 @@ function givenLiveTenant() {
     hours: null,
     greeting_style: "formal",
     custom_greeting: null,
+      custom_goodbye: null,
     escalation_raw: null,
     escalation: null,
     greeting: "Good day, you have reached Careful Legal.",
@@ -827,6 +842,9 @@ describe("Agent / General", () => {
         operating_hours: "Mon-Fri 9-5",
         greeting_style: "formal",
         custom_greeting: "",
+        // Sent as it stands, not omitted: this panel owns the field, and "" on
+        // a profile that never had a sign-off means the same as leaving it.
+        custom_goodbye: "",
         escalation_rules: "",
         agent_name: "Hope",
       }),
@@ -878,5 +896,311 @@ describe("Agent / General", () => {
     expect(await screen.findByLabelText("Name")).toBeDisabled();
     expect(screen.queryByRole("button", { name: /save changes/i })).not.toBeInTheDocument();
     expect(screen.getByText(/only an owner or admin/i)).toBeInTheDocument();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Agent / Transfer calls
+// ---------------------------------------------------------------------------
+
+function transferRule(overrides: Partial<TransferRuleView> = {}): TransferRuleView {
+  return {
+    id: "tr1",
+    label: "Front desk",
+    destination_e164: "+18055550143",
+    condition: "the caller asks about billing",
+    transfer_type: "warm",
+    enabled: true,
+    position: 1,
+    created_at: "2026-10-20T00:00:00Z",
+    ...overrides,
+  };
+}
+
+function transferResult(
+  rules: TransferRuleView[],
+  overrides: Partial<TransferRuleResult> = {},
+): TransferRuleResult {
+  return {
+    rules,
+    max_rules: 10,
+    cold_transfer_available: true,
+    config_version: 3,
+    synced: true,
+    detail: "Saved. Your receptionist uses it from the next call.",
+    ...overrides,
+  };
+}
+
+/** No rules yet. `coldAvailable` is what the call path can actually do. */
+function givenNoTransferRules(coldAvailable = true) {
+  vi.mocked(api.listTransferRules).mockResolvedValue({
+    rules: [],
+    max_rules: 10,
+    cold_transfer_available: coldAvailable,
+  });
+}
+
+function givenOneTransferRule() {
+  vi.mocked(api.listTransferRules).mockResolvedValue({
+    rules: [transferRule()],
+    max_rules: 10,
+    cold_transfer_available: true,
+  });
+}
+
+describe("Agent / Transfer calls", () => {
+  beforeEach(() => {
+    navigation.pathname = "/dashboard/agent";
+    navigation.search = "?section=transfer";
+  });
+
+  it("asks for a rule when there are none, the way the empty state should", async () => {
+    givenNoTransferRules();
+    renderPage(<AgentTransfers />);
+
+    expect(
+      await screen.findByText(/want certain calls to go to a real person\?/i),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /add transferring rule/i })).toBeEnabled();
+  });
+
+  it("sends the number and the condition, and shows what publishing did", async () => {
+    givenNoTransferRules();
+    vi.mocked(api.createTransferRule).mockResolvedValue(transferResult([transferRule()]));
+    renderPage(<AgentTransfers />);
+
+    fireEvent.click(await screen.findByRole("button", { name: /add transferring rule/i }));
+    fireEvent.change(screen.getByLabelText("Transfer to"), { target: { value: "(805) 555-0143" } });
+    fireEvent.change(screen.getByLabelText(/when should calls be transferred/i), {
+      target: { value: "the caller asks about billing" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /add rule/i }));
+
+    await waitFor(() =>
+      expect(api.createTransferRule).toHaveBeenCalledWith("t1", {
+        destination_number: "(805) 555-0143",
+        condition: "the caller asks about billing",
+        label: "",
+        transfer_type: "warm",
+      }),
+    );
+    // The write answers with the whole list, so the page needs no second read.
+    expect(await screen.findByText(/\(805\) 555-0143/)).toBeInTheDocument();
+    expect(api.listTransferRules).toHaveBeenCalledTimes(1);
+  });
+
+  it("will not send a rule with no condition", async () => {
+    givenNoTransferRules();
+    renderPage(<AgentTransfers />);
+
+    fireEvent.click(await screen.findByRole("button", { name: /add transferring rule/i }));
+    fireEvent.change(screen.getByLabelText("Transfer to"), { target: { value: "8055550143" } });
+    fireEvent.click(screen.getByRole("button", { name: /add rule/i }));
+
+    expect(
+      await screen.findByText(/say when this rule should transfer a call/i),
+    ).toBeInTheDocument();
+    expect(api.createTransferRule).not.toHaveBeenCalled();
+  });
+
+  it("says so when the rule is saved but the voice agent was not updated", async () => {
+    givenOneTransferRule();
+    vi.mocked(api.deleteTransferRule).mockResolvedValue(
+      transferResult([], {
+        synced: false,
+        detail:
+          "Saved, but the voice agent couldn't be updated yet, so calls are still being " +
+          "transferred the previous way.",
+      }),
+    );
+    renderPage(<AgentTransfers />);
+
+    fireEvent.click(await screen.findByRole("button", { name: /actions for front desk/i }));
+    fireEvent.click(screen.getByRole("menuitem", { name: /delete rule/i }));
+    fireEvent.click(screen.getByRole("button", { name: /^delete rule$/i }));
+
+    // On the page, not only in the toast: a deleted rule that has not reached
+    // the vendor still transfers callers, and a message that fades away hides
+    // exactly the thing the owner needs to act on.
+    const warnings = await screen.findAllByText(/still being transferred the previous way/i);
+    expect(warnings.some((node) => node.closest(".alert"))).toBe(true);
+  });
+
+  it("offers only an announced transfer where a straight-through one cannot work", async () => {
+    givenNoTransferRules(false);
+    renderPage(<AgentTransfers />);
+
+    fireEvent.click(await screen.findByRole("button", { name: /add transferring rule/i }));
+    expect(screen.queryByLabelText(/straight through/i)).not.toBeInTheDocument();
+    expect(screen.getByText(/transferred with an announcement/i)).toBeInTheDocument();
+  });
+
+  it("shows a member the rules but none of the controls", async () => {
+    givenOneTransferRule();
+    renderPage(<AgentTransfers />, MEMBER);
+
+    expect(await screen.findByText("Front desk")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /add transferring rule/i }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /actions for/i })).not.toBeInTheDocument();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Agent / General — scheduled greetings
+// ---------------------------------------------------------------------------
+
+const USUAL = "Thank you for calling Careful Legal. How can I help you today?";
+const LUNCH = "We're closed for lunch until one. Leave a message and we'll call you back.";
+
+function greetingRule(overrides: Partial<GreetingRuleView> = {}): GreetingRuleView {
+  return {
+    id: "gr1",
+    kind: "weekly",
+    message: LUNCH,
+    weekdays: [0, 1, 2, 3, 4],
+    start_minute: 720,
+    end_minute: 780,
+    start_date: null,
+    end_date: null,
+    enabled: true,
+    position: 1,
+    created_at: "2026-10-20T00:00:00Z",
+    ...overrides,
+  };
+}
+
+function greetingResult(
+  rules: GreetingRuleView[],
+  overrides: Partial<GreetingRuleResult> = {},
+): GreetingRuleResult {
+  return {
+    rules,
+    max_rules: 24,
+    timezone: "America/New_York",
+    default_greeting: USUAL,
+    active_message: USUAL,
+    config_version: 4,
+    synced: true,
+    detail: "Saved. Your receptionist uses it from the next call.",
+    ...overrides,
+  };
+}
+
+function givenGreetings(rules: GreetingRuleView[], overrides: Partial<GreetingRuleResult> = {}) {
+  const { config_version, synced, detail, ...view } = greetingResult(rules, overrides);
+  void config_version;
+  void synced;
+  void detail;
+  vi.mocked(api.listGreetingRules).mockResolvedValue(view);
+}
+
+describe("Agent / General — scheduled greetings", () => {
+  beforeEach(() => {
+    navigation.pathname = "/dashboard/agent";
+    navigation.search = "?section=general";
+  });
+
+  it("answers what callers hear right now, not just when the rules apply", async () => {
+    givenGreetings([greetingRule()], { active_message: LUNCH });
+    renderPage(<AgentGreetings />);
+
+    expect(await screen.findByText(/right now, callers hear/i)).toBeInTheDocument();
+    // Twice: once as the line in force, once as the rule that chose it.
+    expect(screen.getAllByText(`“${LUNCH}”`)).toHaveLength(2);
+    // And it says the exception is temporary, so nobody edits it back by hand.
+    expect(screen.getByText(/comes back on its own/i)).toBeInTheDocument();
+  });
+
+  it("names the clock the rules are read against", async () => {
+    givenGreetings([]);
+    renderPage(<AgentGreetings />);
+
+    // Once per card. Assuming your own timezone is the mistake this prevents.
+    expect(await screen.findAllByText("America/New York")).toHaveLength(2);
+  });
+
+  it("sends the days and the window a weekly greeting was given", async () => {
+    givenGreetings([]);
+    vi.mocked(api.createGreetingRule).mockResolvedValue(greetingResult([greetingRule()]));
+    renderPage(<AgentGreetings />);
+
+    const weekly = (await screen.findByText(/different greeting at certain times/i)).closest(
+      ".card",
+    )!;
+    fireEvent.click(within(weekly as HTMLElement).getByRole("button", { name: /add rule/i }));
+    fireEvent.change(screen.getByLabelText("Greeting message"), { target: { value: LUNCH } });
+    // Scoped to the dialog: the cards have "Add rule" buttons of their own.
+    fireEvent.click(
+      within(screen.getByRole("dialog")).getByRole("button", { name: /^add rule$/i }),
+    );
+
+    await waitFor(() =>
+      expect(api.createGreetingRule).toHaveBeenCalledWith("t1", {
+        kind: "weekly",
+        message: LUNCH,
+        weekdays: [0, 1, 2, 3, 4],
+        start_minute: 720,
+        end_minute: 780,
+      }),
+    );
+  });
+
+  it("will not send a dated greeting with no date", async () => {
+    givenGreetings([]);
+    renderPage(<AgentGreetings />);
+
+    const dated = (await screen.findByText(/different greeting on specific dates/i)).closest(
+      ".card",
+    )!;
+    fireEvent.click(within(dated as HTMLElement).getByRole("button", { name: /add rule/i }));
+    fireEvent.change(screen.getByLabelText("Greeting message"), { target: { value: "Closed." } });
+    fireEvent.click(
+      within(screen.getByRole("dialog")).getByRole("button", { name: /^add rule$/i }),
+    );
+
+    expect(await screen.findByText(/choose the date this greeting applies to/i)).toBeInTheDocument();
+    expect(api.createGreetingRule).not.toHaveBeenCalled();
+  });
+
+  it("says so when the greeting is saved but the voice agent was not updated", async () => {
+    givenGreetings([greetingRule()]);
+    vi.mocked(api.deleteGreetingRule).mockResolvedValue(
+      greetingResult([], {
+        synced: false,
+        detail:
+          "Saved, but the voice agent couldn't be updated yet, so callers still hear the " +
+          "previous greeting.",
+      }),
+    );
+    renderPage(<AgentGreetings />);
+
+    fireEvent.click(await screen.findByRole("button", { name: /actions for the greeting/i }));
+    fireEvent.click(screen.getByRole("menuitem", { name: /delete greeting/i }));
+    fireEvent.click(screen.getByRole("button", { name: /^delete greeting$/i }));
+
+    // On the page, not only in a toast: until it syncs, callers are hearing
+    // something the owner has already deleted.
+    const warnings = await screen.findAllByText(/still hear the previous greeting/i);
+    expect(warnings.some((node) => node.closest(".alert"))).toBe(true);
+  });
+
+  it("keeps a switched-off greeting on file and out of the schedule", async () => {
+    givenGreetings([greetingRule({ enabled: false })]);
+    renderPage(<AgentGreetings />);
+
+    expect(await screen.findByText("Off")).toBeInTheDocument();
+    expect(screen.getByText(`“${LUNCH}”`)).toBeInTheDocument();
+  });
+
+  it("shows a member the schedule but none of the controls", async () => {
+    givenGreetings([greetingRule()]);
+    renderPage(<AgentGreetings />, MEMBER);
+
+    expect(await screen.findByText(`“${LUNCH}”`)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /add rule/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /actions for/i })).not.toBeInTheDocument();
   });
 });

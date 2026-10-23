@@ -11,6 +11,13 @@
  *   saving it does not publish a new configuration.
  * - **Timezone** is read by the agent. Opening hours are stored *in* it, so
  *   changing it republishes — and the form warns before it does.
+ * - **The greeting** is spoken word for word. Blank is not empty: it means
+ *   "write one for me", and the line setup wrote is shown as the placeholder
+ *   so the field can say which it is.
+ * - **The goodbye** is an instruction, not a script. A voice agent has a first
+ *   message and no last one, so this is rendered into the prompt and followed
+ *   rather than read out — the field says so instead of letting the two look
+ *   like the same kind of promise.
  *
  * The number is read-only here. Buying, releasing and forwarding a number all
  * live on the Phone page already, and a second set of controls for them is a
@@ -25,11 +32,12 @@ import { Alert } from "@/components/ui/Alert";
 import { Button, ButtonLink } from "@/components/ui/Button";
 import { Card, CardHeader } from "@/components/ui/Card";
 import { Skeleton } from "@/components/ui/Feedback";
-import { SelectField, TextField } from "@/components/ui/Field";
-import { ClockIcon, PhoneIcon, UserIcon, type IconProps } from "@/components/ui/icons";
+import { SelectField, TextAreaField, TextField } from "@/components/ui/Field";
+import { MessageIcon, ClockIcon, PhoneIcon, UserIcon, type IconProps } from "@/components/ui/icons";
 import { useToast } from "@/components/ui/Toast";
 import { ApiError, listTimezones, updateAgentSettings } from "@/lib/api";
 import { formatPhone } from "@/lib/format";
+import { GREETING_MAX_LENGTH } from "@/lib/greetings";
 import type { AgentSettingsUpdate, GreetingStyle } from "@/lib/types";
 
 /** A card heading with its icon, so the page matches the section nav. */
@@ -70,14 +78,20 @@ export function AgentGeneral() {
 
   const [name, setName] = useState(profile?.agent_name ?? "");
   const [timezone, setTimezone] = useState(tenant.timezone);
+  const [greeting, setGreeting] = useState(profile?.custom_greeting ?? "");
+  const [goodbye, setGoodbye] = useState(profile?.custom_goodbye ?? "");
   const [nameError, setNameError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [result, setResult] = useState<{ tone: "success" | "warn"; text: string } | null>(null);
 
   const savedName = profile?.agent_name ?? "";
+  const savedGreeting = profile?.custom_greeting ?? "";
+  const savedGoodbye = profile?.custom_goodbye ?? "";
   const nameChanged = name.trim() !== savedName;
   const zoneChanged = timezone !== tenant.timezone;
-  const dirty = nameChanged || zoneChanged;
+  const greetingChanged = greeting.trim() !== savedGreeting;
+  const goodbyeChanged = goodbye.trim() !== savedGoodbye;
+  const dirty = nameChanged || zoneChanged || greetingChanged || goodbyeChanged;
 
   /**
    * The rest of the agent's settings, sent back untouched.
@@ -96,7 +110,6 @@ export function AgentGeneral() {
       services,
       operating_hours: hours,
       greeting_style: profile.greeting_style as GreetingStyle,
-      custom_greeting: profile.custom_greeting ?? "",
       escalation_rules: profile.escalation_raw ?? "",
     };
   }, [profile]);
@@ -128,7 +141,12 @@ export function AgentGeneral() {
     setSaving(true);
     setResult(null);
 
-    const payload: AgentSettingsUpdate = { ...carried, agent_name: trimmed };
+    const payload: AgentSettingsUpdate = {
+      ...carried,
+      agent_name: trimmed,
+      custom_greeting: greeting.trim(),
+      custom_goodbye: goodbye.trim(),
+    };
     // Omitted rather than sent unchanged, so a no-op save cannot look like a
     // timezone edit in the audit trail.
     if (zoneChanged) payload.timezone = timezone;
@@ -211,6 +229,39 @@ export function AgentGeneral() {
 
       <Card>
         <CardHeader
+          title={<Heading icon={MessageIcon}>Greeting and goodbye</Heading>}
+          description="The first thing a caller hears, and how the call ends."
+        />
+        <div className="space-y-3 p-4 pt-0">
+          <TextAreaField
+            label="Default greeting message"
+            rows={3}
+            maxLength={GREETING_MAX_LENGTH}
+            value={greeting}
+            disabled={!canManage}
+            placeholder={profile?.greeting ?? ""}
+            onChange={(event) => setGreeting(event.target.value)}
+            hint="Leave it blank and we'll keep the one written from your business details, shown above in grey."
+          />
+          <TextAreaField
+            label="Goodbye message"
+            optional
+            rows={2}
+            maxLength={GREETING_MAX_LENGTH}
+            value={goodbye}
+            disabled={!canManage}
+            placeholder="Thanks for calling. Have a great day."
+            onChange={(event) => setGoodbye(event.target.value)}
+            hint="Your receptionist is told to sign off with this. Unlike the greeting above, it's an instruction rather than a script, so the wording can vary slightly."
+          />
+          {greetingChanged || goodbyeChanged ? (
+            <Alert tone="warn">Saving this publishes a new version of your receptionist.</Alert>
+          ) : null}
+        </div>
+      </Card>
+
+      <Card>
+        <CardHeader
           title={<Heading icon={PhoneIcon}>Agent phone number</Heading>}
           description="Forward calls to this number, or use it directly for your business."
         />
@@ -240,6 +291,8 @@ export function AgentGeneral() {
               onClick={() => {
                 setName(savedName);
                 setTimezone(tenant.timezone);
+                setGreeting(savedGreeting);
+                setGoodbye(savedGoodbye);
                 setNameError(null);
                 setResult(null);
               }}

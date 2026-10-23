@@ -13,6 +13,7 @@ from app.api.v1 import (
     admin,
     auth,
     contacts,
+    greetings,
     integrations,
     numbers,
     onboarding,
@@ -20,6 +21,7 @@ from app.api.v1 import (
     signups,
     sms,
     tenants,
+    transfers,
     voice,
     webhooks,
     website,
@@ -45,6 +47,12 @@ router.include_router(portal.router)
 # Contacts: the same /tenants/{id} prefix, membership to read and admin to
 # write, like the rest of the portal.
 router.include_router(contacts.router)
+# Transfer rules: the Agent page's own section, same prefix, admin to write
+# because a rule is what makes the product dial a real person.
+router.include_router(transfers.router)
+# Scheduled greetings: the other half of the same section, and admin to write
+# for the same reason — it is what a caller hears first, spoken verbatim.
+router.include_router(greetings.router)
 router.include_router(integrations.router)
 router.include_router(sms.router)
 router.include_router(webhooks.router)

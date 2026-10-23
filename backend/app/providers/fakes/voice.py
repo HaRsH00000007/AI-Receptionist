@@ -9,11 +9,12 @@ succeeded would make the verify step meaningless.
 from __future__ import annotations
 
 import itertools
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 
 from app.core.errors import VendorError
 from app.providers.fakes.support import Behaviour, instance_token
-from app.providers.models import AgentRef, PhoneNumberRef
+from app.providers.models import AgentRef, PhoneNumberRef, TransferTarget
 
 
 @dataclass
@@ -23,6 +24,10 @@ class _StoredAgent:
     voice_id: str
     system_prompt: str
     first_message: str
+    #: The complete set the last push carried. A push with none empties it,
+    #: which is what lets a test prove that deleting the last transfer rule
+    #: stops the vendor forwarding rather than quietly leaving it in place.
+    transfers: tuple[TransferTarget, ...] = ()
 
     def to_ref(self) -> AgentRef:
         return AgentRef(
@@ -64,7 +69,13 @@ class FakeElevenLabsProvider:
 
     # ---- agents ----------------------------------------------------------
     async def create_agent(
-        self, *, name: str, system_prompt: str, first_message: str, voice_id: str
+        self,
+        *,
+        name: str,
+        system_prompt: str,
+        first_message: str,
+        voice_id: str,
+        transfers: Sequence[TransferTarget] = (),
     ) -> AgentRef:
         self.behaviour.record("create_agent", name=name, voice_id=voice_id)
 
@@ -84,6 +95,7 @@ class FakeElevenLabsProvider:
             voice_id=voice_id,
             system_prompt=system_prompt,
             first_message=first_message,
+            transfers=tuple(transfers),
         )
         self.agents[agent.agent_id] = agent
         return agent.to_ref()
@@ -108,8 +120,9 @@ class FakeElevenLabsProvider:
         system_prompt: str,
         first_message: str,
         voice_id: str,
+        transfers: Sequence[TransferTarget] = (),
     ) -> AgentRef:
-        self.behaviour.record("update_agent", agent_id=agent_id)
+        self.behaviour.record("update_agent", agent_id=agent_id, transfers=len(transfers))
         agent = self.agents.get(agent_id)
         if agent is None:
             raise VendorError(
@@ -124,6 +137,8 @@ class FakeElevenLabsProvider:
         agent.system_prompt = system_prompt
         agent.first_message = first_message
         agent.voice_id = voice_id
+        # Replaced, never merged: the caller passes the complete set.
+        agent.transfers = tuple(transfers)
         return agent.to_ref()
 
     async def delete_agent(self, *, agent_id: str) -> None:

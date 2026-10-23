@@ -38,7 +38,20 @@ export function GetStartedGate() {
   const router = useRouter();
   const params = useSearchParams();
   const another = params?.get("another") === "1";
-  const mode = params?.get("mode") === "website" ? "website" : params?.get("mode") === "manual" ? "manual" : null;
+  const requested = params?.get("mode");
+  const mode: SetupMode | null =
+    requested === "website" ? "website" : requested === "manual" ? "manual" : null;
+  /**
+   * "Show me both options", said deliberately — by Back on the first step of a
+   * flow, which is the only way to say it.
+   *
+   * It needs to be its own value rather than the absence of `mode`, because an
+   * unfinished website setup resumes on a bare `/get-started` and "no mode" is
+   * what landing there looks like. Without this, backing out would strip the
+   * parameter, the draft would put the flow straight back on screen, and Back
+   * would look broken.
+   */
+  const choosing = requested === "choose";
   const [check, setCheck] = useState<Check>({ status: "checking" });
 
   useEffect(() => {
@@ -84,15 +97,24 @@ export function GetStartedGate() {
 
   if (check.status === "show") {
     const resumable = check.website && check.website.status !== "confirmed";
-    const chosen: SetupMode | null = resumable ? "website" : mode;
+    /**
+     * An unfinished website setup decides where someone *lands*; a choice in
+     * the URL outranks it.
+     *
+     * The draft used to win unconditionally, which quietly disabled both ways
+     * out of the website flow for the only people who could be in it: Back on
+     * the first step, and "fill in a form instead". Each rewrote the URL, the
+     * draft overrode it, and the same screen came straight back.
+     */
+    const chosen: SetupMode | null = choosing ? null : (mode ?? (resumable ? "website" : null));
 
     function leave() {
-      // Back out of a flow: drop the mode and show both options again. The
-      // draft stays on the server, so returning resumes where they were.
+      // Back out of a flow: ask for the choice screen explicitly and show both
+      // options again. The draft stays on the server, so choosing the website
+      // flow again resumes where they were.
       const query = new URLSearchParams(params?.toString() ?? "");
-      query.delete("mode");
-      const rest = query.toString();
-      router.replace(rest ? `/get-started?${rest}` : "/get-started");
+      query.set("mode", "choose");
+      router.replace(`/get-started?${query.toString()}`);
     }
 
     function choose(next: SetupMode) {

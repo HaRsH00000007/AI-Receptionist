@@ -56,8 +56,15 @@ def render_system_prompt(
     business_type: str,
     config: GeneratedAgentConfig,
     collect: Sequence[str] = (),
+    closing: str = "",
 ) -> str:
     """The full instruction set given to the voice agent.
+
+    ``closing`` is the owner's own sign-off. It is an *instruction* here rather
+    than a field the vendor speaks, because an ElevenLabs agent has a first
+    message and no last one — so the opening line is read verbatim and this is
+    followed. The difference is real and the UI says so; rendering it here at
+    least makes the instruction deterministic and part of the version.
 
     ``collect`` is what the business chose to ask every caller for. It is
     rendered here, deterministically, rather than left to the model: a customer
@@ -106,6 +113,14 @@ def render_system_prompt(
 
     if config.fallback_behavior:
         sections += ["", f"If you cannot help: {config.fallback_behavior}"]
+
+    if closing:
+        sections += [
+            "",
+            "Ending the call:",
+            f'- When the caller is done, sign off with exactly: "{closing}"',
+            "- Say it once, then end the call. Do not add anything after it.",
+        ]
 
     sections += [
         "",

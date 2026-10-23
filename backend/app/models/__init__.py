@@ -14,6 +14,7 @@ from app.models.billing import BillingEvent, Subscription
 from app.models.business_profile import BusinessProfile
 from app.models.call import Call
 from app.models.contact import Contact
+from app.models.greeting_rule import GreetingRule
 from app.models.identity import Membership, Session, User
 from app.models.integration import TenantIntegration
 from app.models.onboarding import OnboardingDraft
@@ -28,6 +29,7 @@ from app.models.phone_number import PhoneNumber
 from app.models.provisioning import ProvisioningRun, ProvisioningStepRecord
 from app.models.sms import SmsRegistration
 from app.models.tenant import Tenant
+from app.models.transfer_rule import TransferRule
 from app.models.usage import UsageDaily, UsageEvent
 from app.models.webhook_event import WebhookEvent
 from app.models.website_onboarding import WebsiteOnboarding
@@ -41,6 +43,7 @@ __all__ = [
     "Call",
     "Contact",
     "DataDeletionRequest",
+    "GreetingRule",
     "IdempotencyKey",
     "Membership",
     "Notification",
@@ -55,6 +58,7 @@ __all__ = [
     "Subscription",
     "Tenant",
     "TenantIntegration",
+    "TransferRule",
     "UsageDaily",
     "UsageEvent",
     "User",

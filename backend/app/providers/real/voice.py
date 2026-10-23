@@ -5,16 +5,23 @@ ElevenLabs' documented Conversational AI interface (``/v1/convai/*``) as of
 authoring; the fake provider is what CI exercises, and the response parsing is
 written defensively so a renamed field degrades to ``None`` rather than a crash.
 Point ``ELEVENLABS_PROVIDER=elevenlabs`` at a real key to try it — see README.
+
+One exception to that: ``_built_in_tools`` **has** been checked against the
+live API, on a throwaway agent. The vendor accepted the payload as written and
+stored both transfer types (``warm`` as ``conference``, ``cold`` as ``blind``),
+a later push with no transfers cleared ``transfer_to_number`` to ``null``, and
+``end_call`` survived both — which is what sending the object whole is for.
 """
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any
 
 from app.core.config import Settings
 from app.core.errors import VendorError
 from app.providers.http import ProviderHTTPClient
-from app.providers.models import AgentRef, PhoneNumberRef
+from app.providers.models import AgentRef, PhoneNumberRef, TransferTarget
 
 
 def _agent_ref(payload: dict[str, Any]) -> AgentRef:
@@ -84,14 +91,69 @@ class ElevenLabsRestProvider:
         await self._client.aclose()
 
     # ---- agents ----------------------------------------------------------
+    def _built_in_tools(self, transfers: Sequence[TransferTarget]) -> dict[str, Any]:
+        """The vendor's system tools, as a whole object.
+
+        Sent whole on every update, including ``end_call``, because the vendor
+        documents ``built_in_tools`` as replacing what the agent has rather than
+        merging into it — a payload naming only the transfer tool would take
+        the agent's ability to hang up away with it.
+
+        ``transfer_to_number`` is ``None`` when there is nothing to transfer to.
+        That is the removal, and it is why the key is always present: a business
+        that deletes its last rule must stop forwarding, and leaving the key out
+        would leave the vendor's last copy of the rules in force.
+        """
+        tool: dict[str, Any] | None = None
+        if transfers:
+            tool = {
+                "type": "system",
+                "name": "transfer_to_number",
+                "params": {
+                    "system_tool_type": "transfer_to_number",
+                    "transfers": [
+                        {
+                            "transfer_destination": {
+                                "type": "phone",
+                                "phone_number": target.e164,
+                            },
+                            "condition": target.condition,
+                            # Warm briefs the person before joining the caller;
+                            # cold sends the call straight through. Both need
+                            # the number to have been imported from Twilio
+                            # natively, which is how this product imports it.
+                            "transfer_type": ("conference" if target.kind == "warm" else "blind"),
+                        }
+                        for target in transfers
+                    ],
+                },
+            }
+        return {
+            "end_call": {
+                "type": "system",
+                "name": "end_call",
+                "params": {"system_tool_type": "end_call"},
+            },
+            "transfer_to_number": tool,
+        }
+
     def _agent_body(
-        self, *, name: str, system_prompt: str, first_message: str, voice_id: str
+        self,
+        *,
+        name: str,
+        system_prompt: str,
+        first_message: str,
+        voice_id: str,
+        transfers: Sequence[TransferTarget] = (),
     ) -> dict[str, Any]:
         return {
             "name": name,
             "conversation_config": {
                 "agent": {
-                    "prompt": {"prompt": system_prompt},
+                    "prompt": {
+                        "prompt": system_prompt,
+                        "built_in_tools": self._built_in_tools(transfers),
+                    },
                     "first_message": first_message,
                     "language": "en",
                 },
@@ -100,7 +162,13 @@ class ElevenLabsRestProvider:
         }
 
     async def create_agent(
-        self, *, name: str, system_prompt: str, first_message: str, voice_id: str
+        self,
+        *,
+        name: str,
+        system_prompt: str,
+        first_message: str,
+        voice_id: str,
+        transfers: Sequence[TransferTarget] = (),
     ) -> AgentRef:
         payload = await self._client.post(
             "/v1/convai/agents/create",
@@ -109,6 +177,7 @@ class ElevenLabsRestProvider:
                 system_prompt=system_prompt,
                 first_message=first_message,
                 voice_id=voice_id,
+                transfers=transfers,
             ),
         )
         if not payload or "agent_id" not in payload:
@@ -147,6 +216,7 @@ class ElevenLabsRestProvider:
         system_prompt: str,
         first_message: str,
         voice_id: str,
+        transfers: Sequence[TransferTarget] = (),
     ) -> AgentRef:
         await self._client.patch(
             f"/v1/convai/agents/{agent_id}",
@@ -155,6 +225,7 @@ class ElevenLabsRestProvider:
                 system_prompt=system_prompt,
                 first_message=first_message,
                 voice_id=voice_id,
+                transfers=transfers,
             ),
         )
         updated = await self.get_agent(agent_id=agent_id)

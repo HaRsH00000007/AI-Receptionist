@@ -33,6 +33,16 @@ dependencies = [
     # wheel, and this image installs no build toolchain. Business sites are
     # malformed often enough that a forgiving parser matters more than speed.
     "beautifulsoup4>=4.12",
+    # The IANA time zone database, as a package.
+    #
+    # `zoneinfo` reads the operating system's copy and raises when there is
+    # none — which is every Windows machine, and any slim image that drops
+    # /usr/share/zoneinfo. A receptionist's scheduled greetings and opening
+    # hours are read in the business's own zone, so "the zone could not be
+    # found" would silently mean "read it in UTC": lunch-hour greetings three
+    # hours out, and no error anywhere. Pinned as a real dependency rather than
+    # left to the base image, so every environment agrees what time it is.
+    "tzdata>=2024.2",
 ]
 
 [dependency-groups]

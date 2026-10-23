@@ -51,6 +51,7 @@ from app.models.website_onboarding import WebsiteOnboarding
 from app.schemas.signup import OnboardingRequest, SignupResponse
 from app.schemas.website import (
     ChoicesUpdate,
+    ConfirmRequest,
     CrawlSummaryView,
     KnowledgeUpdate,
     VoiceOptionView,
@@ -246,6 +247,61 @@ async def discard(principal: PrincipalDep, session: SessionDep) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _knowledge_document(payload: KnowledgeUpdate) -> dict[str, Any]:
+    """The approved draft, as it is stored.
+
+    Whole-draft replacement, so a removed item is actually gone rather than
+    lingering with ``enabled: false``. The built-in questions are re-keyed from
+    our own list: a customer may switch "Email" off, but the key the agent's
+    instructions use is not theirs to rename.
+    """
+    builtin = {question["key"]: question for question in BUILTIN_QUESTIONS}
+    questions: list[dict[str, Any]] = []
+    for entry in payload.questions:
+        if entry.key in builtin:
+            questions.append({**builtin[entry.key], "enabled": entry.enabled})
+        else:
+            questions.append(
+                {
+                    "key": entry.key,
+                    "label": entry.label,
+                    "prompt": entry.prompt,
+                    "builtin": False,
+                    "enabled": entry.enabled,
+                }
+            )
+    return {
+        "business_name": payload.business_name,
+        "business_summary": payload.business_summary,
+        "operating_hours": payload.operating_hours,
+        "services": payload.services,
+        "items": [item.model_dump() for item in payload.items],
+        "questions": questions,
+        "sms_templates": [template.model_dump() for template in payload.sms_templates],
+    }
+
+
+def _merged_choices(
+    payload: ChoicesUpdate, settings: Settings, existing: dict[str, Any] | None
+) -> dict[str, Any]:
+    """Validate the last few screens and fold them into what is already there."""
+    if payload.language not in SUPPORTED_LANGUAGES:
+        # Refused rather than stored-and-ignored: a saved "fr" that the call
+        # path never sends would be a promise the product does not keep.
+        raise InvalidInputError(
+            "English is the only language the receptionist speaks today.",
+            details={"field": "language"},
+        )
+    if payload.voice_id and payload.voice_id not in _voice_ids(settings):
+        raise InvalidInputError("That voice isn't available.", details={"field": "voice_id"})
+
+    merged = dict(existing or {})
+    update = payload.model_dump(exclude_none=True)
+    # Blank strings mean "not answered on this screen yet", not "clear it".
+    merged.update({key: value for key, value in update.items() if value != ""})
+    return merged
+
+
 @router.put(
     "/knowledge",
     response_model=WebsiteSetupView,
@@ -263,32 +319,7 @@ async def save_knowledge(
     """
     job = await _require_job(session, principal.user.id)
     _require_editable(job)
-
-    builtin = {question["key"]: question for question in BUILTIN_QUESTIONS}
-    questions: list[dict[str, Any]] = []
-    for entry in payload.questions:
-        if entry.key in builtin:
-            questions.append({**builtin[entry.key], "enabled": entry.enabled})
-        else:
-            questions.append(
-                {
-                    "key": entry.key,
-                    "label": entry.label,
-                    "prompt": entry.prompt,
-                    "builtin": False,
-                    "enabled": entry.enabled,
-                }
-            )
-
-    job.knowledge_json = {
-        "business_name": payload.business_name,
-        "business_summary": payload.business_summary,
-        "operating_hours": payload.operating_hours,
-        "services": payload.services,
-        "items": [item.model_dump() for item in payload.items],
-        "questions": questions,
-        "sms_templates": [template.model_dump() for template in payload.sms_templates],
-    }
+    job.knowledge_json = _knowledge_document(payload)
     return await _saved_view(session, job)
 
 
@@ -300,22 +331,7 @@ async def save_choices(
 ) -> WebsiteSetupView:
     job = await _require_job(session, principal.user.id)
     _require_editable(job)
-
-    if payload.language not in SUPPORTED_LANGUAGES:
-        # Refused rather than stored-and-ignored: a saved "fr" that the call
-        # path never sends would be a promise the product does not keep.
-        raise InvalidInputError(
-            "English is the only language the receptionist speaks today.",
-            details={"field": "language"},
-        )
-    if payload.voice_id and payload.voice_id not in _voice_ids(settings):
-        raise InvalidInputError("That voice isn't available.", details={"field": "voice_id"})
-
-    existing = dict(job.choices_json or {})
-    update = payload.model_dump(exclude_none=True)
-    # Blank strings mean "not answered on this screen yet", not "clear it".
-    existing.update({key: value for key, value in update.items() if value != ""})
-    job.choices_json = existing
+    job.choices_json = _merged_choices(payload, settings, job.choices_json)
     return await _saved_view(session, job)
 
 
@@ -371,6 +387,7 @@ async def confirm(
     session: SessionDep,
     settings: SettingsDep,
     temporal: TemporalClientDep,
+    payload: ConfirmRequest | None = None,
 ) -> SignupResponse:
     """Hand the approved draft to the existing signup pipeline.
 
@@ -378,6 +395,13 @@ async def confirm(
     manual form submits, so the number is bought by the same step, behind the
     same billing gate, with the same idempotency guards. What the website added
     is carried on the business profile, where the agent is rebuilt from.
+
+    The wizard posts every screen here in one request. Keeping the review,
+    questions, voice and greeting in the browser until this moment is what makes
+    an abandoned setup leave nothing behind: press Back and the only thing that
+    was ever written is the crawl, which the discard removes. The body is
+    optional, so a client that saved as it went still works, and so does a
+    repeat of a request that has already created a business.
 
     Idempotent: a job already marked confirmed returns its business with 200.
     """
@@ -394,13 +418,24 @@ async def confirm(
         )
     await request.app.state.signup_rate_limiter.check(f"website-confirm|{principal.user.id}")
 
+    # Applied before anything is built, and through the same helpers the save
+    # routes use, so "what the customer approved" cannot mean one thing when it
+    # is saved step by step and another when it arrives all at once.
+    if payload is not None and payload.knowledge is not None:
+        job.knowledge_json = _knowledge_document(payload.knowledge)
+    if payload is not None and payload.choices is not None:
+        job.choices_json = _merged_choices(payload.choices, settings, job.choices_json)
+
     knowledge = dict(job.knowledge_json or {})
     choices = dict(job.choices_json or {})
-    payload = _onboarding_request(knowledge, choices, fallback_email=principal.user.email)
+    # A separate name, not a reassignment of ``payload``: that one is the
+    # customer's last screenful, and overwriting it with the signup request
+    # built from it would leave two different shapes behind one variable.
+    signup = _onboarding_request(knowledge, choices, fallback_email=principal.user.email)
 
     correlation_id = get_correlation_id() or new_correlation_id()
     result = await SignupService(session, settings).submit(
-        payload, correlation_id=correlation_id, owner=principal.user
+        signup, correlation_id=correlation_id, owner=principal.user
     )
 
     # The website's contribution, onto the thing the agent is generated from.
@@ -500,7 +535,7 @@ def _onboarding_request(
             notification_email=str(choices.get("notification_email") or fallback_email),
             area_code=str(choices.get("area_code") or "").strip() or "805",
             selected_number=str(choices.get("selected_number") or ""),
-            plan=str(choices.get("plan") or "starter"),  # type: ignore[arg-type]
+            plan=str(choices.get("plan") or "starter"),
             contact_phone=str(choices.get("contact_phone") or ""),
         )
     except ValueError as exc:

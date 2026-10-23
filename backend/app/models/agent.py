@@ -6,7 +6,7 @@ import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import ForeignKey, Index, String, text
+from sqlalchemy import ForeignKey, Index, String, Text, text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
@@ -69,6 +69,17 @@ class Agent(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     )
     #: When the vendor object was last confirmed to match ``agent_config_id``.
     synced_at: Mapped[datetime | None] = mapped_column(nullable=True)
+
+    #: The opening line the vendor's copy currently holds.
+    #:
+    #: Normally the config's ``first_message``, but not while a scheduled
+    #: greeting is running: those replace the opening line as the clock moves,
+    #: without publishing a version (:mod:`app.services.greeting_schedule`).
+    #: ``agent_config_id`` cannot record that — the config is the same one
+    #: either way — so the sweep that keeps the projection honest needs this
+    #: column to know whether it has anything to do. Null means "never pushed",
+    #: which is also what an agent created before this column existed says.
+    greeting_in_effect: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     tenant: Mapped[Tenant] = relationship(back_populates="agents")
     agent_config: Mapped[AgentConfig] = relationship(back_populates="agents")

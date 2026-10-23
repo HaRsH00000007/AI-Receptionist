@@ -52,6 +52,10 @@ vi.mock("@/lib/api", async () => {
     saveOnboardingDraft: vi.fn(),
     getWebsiteSetupOrNull: vi.fn(),
     startWebsiteSetup: vi.fn(),
+    discardWebsiteSetup: vi.fn(),
+    saveWebsiteKnowledge: vi.fn(),
+    saveWebsiteChoices: vi.fn(),
+    confirmWebsiteSetup: vi.fn(),
     registerAccount: vi.fn(),
     logout: vi.fn(),
   };
@@ -458,6 +462,35 @@ describe("the dashboard for an account with no business yet", () => {
     await waitFor(() => expect(navigation.replace).toHaveBeenCalledWith("/get-started"));
     expect(screen.queryByText("page content")).not.toBeInTheDocument();
   });
+
+  it("does not bounce an account whose businesses are all cancelled", async () => {
+    // The loop this guards against: the gate sends them to the form because no
+    // business is workable, and the form sends anyone holding a membership back
+    // to the dashboard. Both pages then flicker and neither ever renders.
+    // `another=1` is the door that breaks it.
+    vi.mocked(api.getSessionOrNull).mockResolvedValue({
+      ...OWNER,
+      active_tenant_id: null,
+      memberships: [
+        { tenant_id: "t1", name: "Careful Legal", role: "owner", status: "cancelled" },
+        { tenant_id: "t2", name: "Second Try", role: "owner", status: "cancelled" },
+      ],
+    });
+    render(
+      <DashboardGate>
+        <p>page content</p>
+      </DashboardGate>,
+    );
+
+    await waitFor(() =>
+      expect(navigation.replace).toHaveBeenCalledWith("/get-started?another=1"),
+    );
+    expect(navigation.replace).not.toHaveBeenCalledWith("/get-started");
+    // And nothing tenant-shaped is mounted behind the redirect, which is what
+    // left the page sitting on "Loading your receptionist…".
+    expect(screen.queryByText("page content")).not.toBeInTheDocument();
+    expect(api.getTenant).not.toHaveBeenCalled();
+  });
 });
 
 describe("creating an account", () => {
@@ -531,6 +564,55 @@ describe("getting back out of the website flow", () => {
     vi.mocked(api.getWebsiteSetupOrNull).mockResolvedValue(null);
   }
 
+  /** A website setup that has been read and is waiting on the review. */
+  function givenReadyDraft() {
+    givenNoDraft();
+    vi.mocked(api.getWebsiteSetupOrNull).mockResolvedValue({
+      id: "job-1",
+      status: "ready",
+      website_url: "https://sunset.example.com/",
+      attempt: 1,
+      last_error: null,
+      ready: true,
+      tenant_id: null,
+      crawl: {
+        site: "sunset.example.com",
+        pages_read: 3,
+        page_urls: ["https://sunset.example.com/prices"],
+        skipped: 0,
+        failed: 0,
+        duplicates: 0,
+        robots_blocked: 0,
+        truncated: false,
+        reasons: {},
+      },
+      knowledge: {
+        business_name: "Sunset Salon",
+        business_summary: "A salon on the coast.",
+        operating_hours: "Tue-Sat 9-6",
+        services: ["Haircuts"],
+        items: [
+          {
+            id: "k1",
+            category: "service",
+            title: "Haircuts",
+            content: "A standard haircut costs thirty dollars.",
+            source_url: "https://sunset.example.com/prices",
+            needs_review: false,
+            enabled: true,
+          },
+        ],
+        questions: [
+          { key: "name", label: "Name", prompt: "Ask for their name.", builtin: true, enabled: true },
+        ],
+        sms_templates: [],
+      },
+      choices: null,
+      created_at: "2026-10-13T00:00:00Z",
+      updated_at: "2026-10-13T00:00:00Z",
+    });
+  }
+
   it("goes back from the first step to the choice of both ways", async () => {
     // Without this, picking "use my website" was a one-way door: the first
     // step had no Back at all.
@@ -540,7 +622,100 @@ describe("getting back out of the website flow", () => {
     render(<GetStartedGate />);
     fireEvent.click(await screen.findByRole("button", { name: /back/i }));
 
-    await waitFor(() => expect(navigation.replace).toHaveBeenCalledWith("/get-started"));
+    await waitFor(() => expect(navigation.replace).toHaveBeenCalledWith("/get-started?mode=choose"));
+  });
+
+  it("asks for the choice screen by name, so an unfinished draft cannot undo it", async () => {
+    // The bug, as a customer met it: a read website opens on the review, and
+    // Back walks them review -> website -> basics. From basics there is nothing
+    // left to go back to but the choice of both ways — and that press used to
+    // do nothing at all, because stripping the mode let the draft put the
+    // wizard straight back on screen.
+    navigation.search = "mode=website";
+    givenReadyDraft();
+
+    render(<GetStartedGate />);
+    // Review -> website field.
+    fireEvent.click(await screen.findByRole("button", { name: /back/i }));
+    expect(
+      await screen.findByRole("heading", { name: /teach your agent about your business/i }),
+    ).toBeInTheDocument();
+    // Website field -> basics.
+    fireEvent.click(screen.getByRole("button", { name: /back/i }));
+    expect(
+      await screen.findByRole("heading", { name: /first, a few basics/i }),
+    ).toBeInTheDocument();
+    // Basics -> out of the flow.
+    fireEvent.click(screen.getByRole("button", { name: /back/i }));
+
+    await waitFor(() => expect(navigation.replace).toHaveBeenCalledWith("/get-started?mode=choose"));
+  });
+
+  it("takes the half-finished setup with it when someone backs out", async () => {
+    // Nothing the customer typed was ever saved, so the crawl is all there is
+    // to clean up — and leaving it behind is what used to resurrect the flow.
+    navigation.search = "mode=website";
+    givenReadyDraft();
+    vi.mocked(api.discardWebsiteSetup).mockResolvedValue(undefined);
+
+    render(<GetStartedGate />);
+    fireEvent.click(await screen.findByRole("button", { name: /back/i }));
+    expect(
+      await screen.findByRole("heading", { name: /teach your agent about your business/i }),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /back/i }));
+    expect(await screen.findByRole("heading", { name: /first, a few basics/i })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /back/i }));
+
+    await waitFor(() => expect(api.discardWebsiteSetup).toHaveBeenCalled());
+  });
+
+  it("saves nothing while the customer walks through the review", async () => {
+    // The whole point: until the create button, every screen lives in the
+    // browser. A step that wrote as it went would leave a stranger's draft on
+    // the account for anyone who changed their mind.
+    navigation.search = "mode=website";
+    givenReadyDraft();
+
+    render(<GetStartedGate />);
+    expect(
+      await screen.findByRole("heading", { name: /here's what your agent learned/i }),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /next/i }));
+    expect(
+      await screen.findByRole("heading", { name: /what info do you want to ask callers for/i }),
+    ).toBeInTheDocument();
+
+    expect(api.saveWebsiteKnowledge).not.toHaveBeenCalled();
+    expect(api.saveWebsiteChoices).not.toHaveBeenCalled();
+    expect(api.confirmWebsiteSetup).not.toHaveBeenCalled();
+  });
+
+  it("shows both options on the choice screen even with a draft waiting", async () => {
+    navigation.search = "mode=choose";
+    givenReadyDraft();
+
+    render(<GetStartedGate />);
+
+    expect(
+      await screen.findByRole("heading", { name: /how would you like to create/i }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Use my website")).toBeInTheDocument();
+    expect(screen.getByText("Set up manually")).toBeInTheDocument();
+  });
+
+  it("lets someone with a website draft switch to the form instead", async () => {
+    // Same cause, second symptom: "set up manually" rewrote the URL and the
+    // draft overrode it, so the link did nothing.
+    navigation.search = "mode=manual";
+    givenReadyDraft();
+
+    render(<GetStartedGate />);
+
+    expect(
+      await screen.findByRole("heading", { name: /tell us about your business/i }),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/teach your agent about your business/i)).not.toBeInTheDocument();
   });
 
   it("offers a way out while the website is being read", async () => {

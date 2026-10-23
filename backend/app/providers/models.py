@@ -7,7 +7,7 @@ adopting a new Twilio API version, changes one adapter instead of every caller.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -53,6 +53,24 @@ class AgentRef(ProviderModel):
     voice_id: str | None = None
     first_message: str | None = None
     system_prompt: str | None = None
+
+
+class TransferTarget(ProviderModel):
+    """One destination the voice agent may hand a live call to.
+
+    The provider layer's own shape, deliberately not the ``TransferRule`` row:
+    an adapter receives where to send the call and when, and nothing about who
+    owns the rule, whether it is switched on, or where it sits in a list.
+
+    ``kind`` is ours, not the vendor's — ``warm`` or ``cold`` — and each adapter
+    maps it to whatever that vendor calls the same thing.
+    """
+
+    e164: str
+    #: Natural language. The vendor's model reads this to decide whether a call
+    #: is one of the ones this destination should get.
+    condition: str
+    kind: Literal["warm", "cold"] = "warm"
 
 
 class PhoneNumberRef(ProviderModel):

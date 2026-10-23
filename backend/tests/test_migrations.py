@@ -68,6 +68,10 @@ EXPECTED_TABLES = {
     "website_onboardings",
     # ---- contacts ----
     "contacts",
+    # ---- transferring a call to a person ----
+    "transfer_rules",
+    # ---- greetings that replace the usual one on a schedule ----
+    "greeting_rules",
 }
 
 

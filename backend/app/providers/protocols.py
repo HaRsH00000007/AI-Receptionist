@@ -12,6 +12,7 @@ orchestrator reads that flag and never inspects vendor exception types.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Protocol, runtime_checkable
 
 from app.providers.models import (
@@ -27,6 +28,7 @@ from app.providers.models import (
     PhoneNumberRef,
     PurchasedNumber,
     SubscriptionRef,
+    TransferTarget,
 )
 
 
@@ -93,6 +95,7 @@ class ElevenLabsProvider(Protocol):
         system_prompt: str,
         first_message: str,
         voice_id: str,
+        transfers: Sequence[TransferTarget] = (),
     ) -> AgentRef: ...
 
     async def get_agent(self, *, agent_id: str) -> AgentRef | None: ...
@@ -109,8 +112,17 @@ class ElevenLabsProvider(Protocol):
         system_prompt: str,
         first_message: str,
         voice_id: str,
+        transfers: Sequence[TransferTarget] = (),
     ) -> AgentRef:
-        """Push our config onto an existing agent. Backs ``resync_agent``."""
+        """Push our config onto an existing agent. Backs ``resync_agent``.
+
+        ``transfers`` is the complete set, never a delta: an empty sequence
+        means "this agent transfers nothing", and an adapter must clear the
+        vendor's copy rather than leave the last set in place. Anything else
+        would make deleting a business's last transfer rule a no-op at the
+        vendor, and callers would still be forwarded to a number the owner
+        believes they removed.
+        """
         ...
 
     async def delete_agent(self, *, agent_id: str) -> None: ...

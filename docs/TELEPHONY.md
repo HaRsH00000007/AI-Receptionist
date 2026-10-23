@@ -150,6 +150,10 @@ retention policy; a log aggregator has no such policy.
    the conversation connects.
 5. Move tenants in batches. `tenants.agent_mode` and `CALL_PATH` are independent
    — a tenant can be on the production call path with a dedicated agent.
+6. Check their transfer rules. A *cold* ("straight through") rule needs the
+   native Twilio import, so a tenant moved to this path with one still on file
+   has a rule the vendor cannot carry out. Nothing rewrites it automatically:
+   switch it to announced, or leave the tenant on `elevenlabs_native`.
 
 Roll back by pointing the number's webhook back at ElevenLabs. Nothing in the
 database changes, so the rollback is a vendor-side configuration edit.
@@ -159,8 +163,21 @@ database changes, so the rollback is a vendor-side configuration edit.
 ## What is not built
 
 * **We do not terminate the media stream ourselves.** Twilio streams directly to
-  ElevenLabs. Recording, barge-in and live transfer would need a media server we
-  do not have, and inventing one was out of scope.
+  ElevenLabs. Recording and barge-in would need a media server we do not have,
+  and inventing one was out of scope.
+* **Live transfer is the vendor's, not ours.** A transfer rule configures
+  ElevenLabs' own `transfer_to_number` system tool on the agent, so the handover
+  happens inside the vendor's call leg (see `app/services/transfer_rules.py`).
+  That is also why a *cold* transfer is offered only on the `elevenlabs_native`
+  path: a blind transfer needs the number to have been imported into ElevenLabs
+  from Twilio natively, which the TwiML path does not do.
+* **A scheduled greeting is switched by the worker, not by the call.** On the
+  `elevenlabs_native` path the vendor owns the number and answers from the
+  agent's own `first_message`, so there is no request of ours in the middle to
+  substitute one: the worker compares and pushes
+  (`app/services/greeting_sync.py`). On the TwiML path the greeting is a dynamic
+  variable resolved per call from the live configuration, which carries the
+  schedule, so nothing needs to be pushed there at all.
 * **`/voice/init` has not been load-tested at 500 concurrent calls.** The budget
   is measured and the histogram exists; the number in the production plan has
   not been demonstrated.
