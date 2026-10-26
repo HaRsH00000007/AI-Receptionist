@@ -24,6 +24,7 @@ not that choice.
 
 from __future__ import annotations
 
+import builtins
 import csv
 import io
 import re
@@ -160,14 +161,16 @@ class ContactService:
             select(Contact.status, func.count(Contact.id)).where(Contact.tenant_id == tenant_id),
             search,
         )
-        tally = dict(
+        tally: dict[Any, int] = dict(
             (await self.session.execute(counted.group_by(Contact.status))).all()  # type: ignore[arg-type]
         )
         return int(tally.get(ContactStatus.ACTIVE, 0)), int(tally.get(ContactStatus.BLOCKED, 0))
 
+    # `builtins.list`: inside this class, a bare `list` in an annotation names
+    # the `list` method above, not the type.
     async def _with_calls(
-        self, tenant_id: uuid.UUID, contacts: list[Contact]
-    ) -> list[ContactRecord]:
+        self, tenant_id: uuid.UUID, contacts: builtins.list[Contact]
+    ) -> builtins.list[ContactRecord]:
         """Attach call history. One extra query for the whole page, not per row."""
         if not contacts:
             return []

@@ -27,6 +27,7 @@ from datetime import UTC, date, datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
+import pytest
 from fastapi import FastAPI
 from httpx import AsyncClient
 from sqlalchemy import select
@@ -132,6 +133,23 @@ async def _timezone(api_app: FastAPI, tenant_id: uuid.UUID) -> str:
 def _at(timezone: str, when: datetime) -> datetime:
     """A local wall-clock moment, as the instant it actually is."""
     return when.replace(tzinfo=ZoneInfo(timezone)).astimezone(UTC)
+
+
+def _freeze_publishing_clock(monkeypatch: pytest.MonkeyPatch, moment: datetime) -> None:
+    """Make a save push the greeting in force at ``moment``, not at the real now.
+
+    A save publishes whatever line is in force when it happens, so a test that
+    saves a weekly rule and then asserts what was pushed would otherwise depend
+    on the hour the suite runs — inside the rule's window it pushes the rule.
+    """
+    from app.services import config_publishing
+
+    class _Frozen(datetime):
+        @classmethod
+        def now(cls, tz: Any = None) -> datetime:  # type: ignore[override]
+            return moment.astimezone(tz) if tz is not None else moment
+
+    monkeypatch.setattr(config_publishing, "datetime", _Frozen)
 
 
 # ---------------------------------------------------------------------------
@@ -531,7 +549,7 @@ async def test_deleting_the_rule_puts_the_usual_greeting_back(
 
 
 async def test_the_worker_switches_the_greeting_when_the_clock_enters_a_window(
-    api_client: AsyncClient, api_app: FastAPI
+    api_client: AsyncClient, api_app: FastAPI, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Nobody saves anything at noon, so something has to move it.
 
@@ -542,12 +560,15 @@ async def test_the_worker_switches_the_greeting_when_the_clock_enters_a_window(
     owner = await live_owner(api_client, api_app)
     default = (await _live_config(api_app, owner.tenant_id)).first_message
     timezone = await _timezone(api_app, owner.tenant_id)
-    await _add(api_client, owner, _weekly())  # weekdays, 12:00-13:00 local
 
     # A Friday, in the business's own time.
     before_lunch = _at(timezone, datetime(2026, 10, 23, 11, 30))
     during_lunch = _at(timezone, datetime(2026, 10, 23, 12, 30))
     after_lunch = _at(timezone, datetime(2026, 10, 23, 14, 0))
+
+    # Saved before lunch, so the save itself pushes the usual line.
+    _freeze_publishing_clock(monkeypatch, before_lunch)
+    await _add(api_client, owner, _weekly())  # weekdays, 12:00-13:00 local
 
     assert await _sweep(api_app, before_lunch) == 0, "already correct"
     assert await _pushed_greeting(api_app, owner.tenant_id) == default

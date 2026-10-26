@@ -35,7 +35,7 @@ from app.core.config import Settings
 from app.core.errors import VendorError
 from app.core.logging import get_logger
 from app.providers.protocols import LLMProvider
-from app.schemas.agent_config import StrictModel
+from app.schemas.business import StrictModel
 from app.website.crawler import CrawlReport, Page
 
 logger = get_logger(__name__)

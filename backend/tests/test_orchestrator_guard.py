@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import uuid
 
+import pytest
+
 from app.models import ProvisioningRun
 from app.models.enums import ProvisioningStatus
 from app.schemas.signup import SignupRequest
@@ -107,9 +109,13 @@ async def test_post_call_processing_runs_under_either_orchestrator(
     assert worker.stats.polls == 1
 
 
-async def test_temporal_is_the_default_orchestrator() -> None:
+async def test_temporal_is_the_default_orchestrator(monkeypatch: pytest.MonkeyPatch) -> None:
     """M4 made Temporal authoritative; a fresh deployment gets it."""
     from app.core.config import Settings
+
+    # `_env_file=None` skips .env but not the process environment, and CI sets
+    # ORCHESTRATOR=state_machine for the whole job. The default is the subject.
+    monkeypatch.delenv("ORCHESTRATOR", raising=False)
 
     settings = Settings(
         database_url="postgresql+asyncpg://u:p@localhost:5432/db",

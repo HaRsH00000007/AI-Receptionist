@@ -90,7 +90,7 @@ def _view(entry: IntegrationEntry) -> IntegrationView:
         status=status,
         account=row.external_account_id if row is not None and status != "not_connected" else None,
         connected_at=row.connected_at if row is not None and status != "not_connected" else None,
-        last_error=row.last_error if status == "error" else None,
+        last_error=row.last_error if row is not None and status == "error" else None,
     )
 
 

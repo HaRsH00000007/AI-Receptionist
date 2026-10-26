@@ -119,10 +119,11 @@ jobs:
         # which is right on a laptop and wrong in CI: it would turn a broken
         # service container into a green run with 168 silent skips. Fail loudly
         # instead.
-        run: uv run python -c "
-          import asyncio, os, sys;
-          from sqlalchemy.ext.asyncio import create_async_engine;
-          url = os.environ['TEST_DATABASE_URL'].rpartition('/')[0] + '/postgres';
+        run: |
+          uv run python - <<'EOF'
+          import asyncio, os
+          from sqlalchemy.ext.asyncio import create_async_engine
+          url = os.environ['TEST_DATABASE_URL'].rpartition('/')[0] + '/postgres'
           async def main():
               engine = create_async_engine(url)
               try:
@@ -130,7 +131,7 @@ jobs:
               finally:
                   await engine.dispose()
           asyncio.run(main())
-          "
+          EOF
         working-directory: backend
 
       - run: uv run pytest -q
@@ -250,12 +251,13 @@ jobs:
       - name: No credential-shaped literals in source
         # Deliberately narrow: real vendor key prefixes only. A broad "secret"
         # grep produces noise, gets ignored, and then misses the real thing.
+        # This file is excluded because the pattern below would match itself.
         run: |
           set +e
           matches=$(grep -rInE \
             '(sk_live_|sk_test_[A-Za-z0-9]{16,}|rk_live_|whsec_[A-Za-z0-9]{16,}|AC[0-9a-f]{32}|SG\.[A-Za-z0-9_-]{20,}|xoxb-|AKIA[0-9A-Z]{16})' \
             --include='*.py' --include='*.ts' --include='*.tsx' --include='*.yml' --include='*.yaml' \
-            --exclude-dir=node_modules --exclude-dir=.git . )
+            --exclude-dir=node_modules --exclude-dir=.git --exclude=ci.yml . )
           set -e
           if [ -n "$matches" ]; then
             echo "::error::Credential-shaped literal found in source:"
@@ -271,8 +273,15 @@ jobs:
       - name: Python dependency audit
         # Advisory: a new CVE in a transitive dependency should be visible on
         # the next run, but it should not block an unrelated pull request.
+        #
+        # Audits the exact versions pinned in uv.lock. A bare `uvx pip-audit`
+        # audits uvx's own throwaway environment, not this project.
         continue-on-error: true
-        run: uvx pip-audit --strict --progress-spinner off
+        run: |
+          uv export --frozen --no-emit-project --format requirements-txt \
+            --output-file "$RUNNER_TEMP/requirements.txt"
+          uvx pip-audit --strict --progress-spinner off --disable-pip --require-hashes \
+            -r "$RUNNER_TEMP/requirements.txt"
         working-directory: backend
 
       - uses: actions/setup-node@v4

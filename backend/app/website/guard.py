@@ -41,6 +41,7 @@ from __future__ import annotations
 import ipaddress
 import socket
 from dataclasses import dataclass
+from typing import NoReturn
 from urllib.parse import urlsplit, urlunsplit
 
 from app.core.errors import InvalidInputError
@@ -296,11 +297,11 @@ def _resolve(host: str, port: int, candidate: str) -> tuple[str, ...]:
     return tuple(addresses)
 
 
-def _refuse(reason: str, candidate: str) -> ValueError:
+def _refuse(reason: str, candidate: str) -> NoReturn:
     """Log precisely, tell the customer nothing.
 
-    Typed as returning so callers can `return _refuse(...)` and keep mypy
-    happy about the branch; it always raises.
+    Always raises. Callers still write `return _refuse(...)` so every refusal
+    reads as the end of its branch.
     """
     logger.info(
         "refused a website url",

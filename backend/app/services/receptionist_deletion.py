@@ -30,6 +30,7 @@ What is *not* done, deliberately:
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
@@ -174,7 +175,7 @@ class ReceptionistDeletionService:
         return outcome
 
     # ------------------------------------------------------------------
-    async def _forget_cached_numbers(self, numbers: list[PhoneNumber]) -> None:
+    async def _forget_cached_numbers(self, numbers: Sequence[PhoneNumber]) -> None:
         lookup = NumberDirectory(self.cache, self.settings)
         for number in numbers:
             await lookup.invalidate(number.e164)
@@ -205,7 +206,7 @@ class ReceptionistDeletionService:
             await self.session.flush()
 
     async def _unlink_numbers(
-        self, tenant: Tenant, numbers: list[PhoneNumber], outcome: DeletionOutcome
+        self, tenant: Tenant, numbers: Sequence[PhoneNumber], outcome: DeletionOutcome
     ) -> None:
         """Remove the ElevenLabs phone import, so the number stops reaching the agent.
 
@@ -277,7 +278,7 @@ class ReceptionistDeletionService:
     async def _handle_numbers(
         self,
         tenant: Tenant,
-        numbers: list[PhoneNumber],
+        numbers: Sequence[PhoneNumber],
         release_number: bool,
         outcome: DeletionOutcome,
     ) -> None:

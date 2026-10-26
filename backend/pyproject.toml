@@ -121,6 +121,9 @@ plugins = ["pydantic.mypy"]
 [[tool.mypy.overrides]]
 module = "tests.*"
 disallow_untyped_decorators = false
+# Test helpers read the session factory and fakes off `app.state`, which
+# Starlette types as Any; every value fetched through it would be flagged.
+warn_return_any = false
 
 [[tool.mypy.overrides]]
 module = "migrations.versions.*"

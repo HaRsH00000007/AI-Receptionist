@@ -21,6 +21,7 @@ Created: 2026-09-22 10:00:00.000000
 from __future__ import annotations
 
 from collections.abc import Sequence
+from typing import Any
 
 import sqlalchemy as sa
 from alembic import op
@@ -36,7 +37,7 @@ def _enum(name: str, *values: str) -> sa.Enum:
     return sa.Enum(*values, name=name, native_enum=False, length=48)
 
 
-def _timestamps() -> list[sa.Column[object]]:
+def _timestamps() -> list[sa.Column[Any]]:
     return [
         sa.Column("id", sa.UUID(), server_default=sa.text("gen_random_uuid()"), nullable=False),
         sa.Column(
