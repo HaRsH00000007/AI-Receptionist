@@ -772,3 +772,19 @@ class SmsUseCase(StrEnum):
     APPOINTMENT_REMINDERS = "appointment_reminders"
     MARKETING = "marketing"
     MIXED = "mixed"
+
+
+# ---------------------------------------------------------------------------
+# Appointments
+# ---------------------------------------------------------------------------
+class AppointmentStatus(StrEnum):
+    """Whether a booking the receptionist made still stands.
+
+    Only two states, because a row is written only *after* the calendar event
+    exists: there is no "pending" booking for anything to get stuck in.
+    """
+
+    BOOKED = "booked"
+    #: The event was removed again — compensation after a failure to record it,
+    #: or a later cancellation.
+    CANCELLED = "cancelled"

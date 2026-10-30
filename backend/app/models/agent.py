@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import ForeignKey, Index, String, Text, text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -80,6 +80,16 @@ class Agent(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     #: column to know whether it has anything to do. Null means "never pushed",
     #: which is also what an agent created before this column existed says.
     greeting_in_effect: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    #: The workspace tools this agent was given at the vendor, and what they
+    #: were configured with: ``{"ids": {name: tool_id}, "fingerprint": str}``.
+    #:
+    #: Tools are separate vendor objects that the agent references by id, so
+    #: these ids are the only way to update or delete them later rather than
+    #: leaving a new pair behind on every push. The fingerprint lets a push skip
+    #: rewriting tools whose configuration has not changed. Null means the agent
+    #: has none (:mod:`app.services.calendar_tools`).
+    vendor_tools: Mapped[dict[str, Any] | None] = mapped_column(nullable=True)
 
     tenant: Mapped[Tenant] = relationship(back_populates="agents")
     agent_config: Mapped[AgentConfig] = relationship(back_populates="agents")

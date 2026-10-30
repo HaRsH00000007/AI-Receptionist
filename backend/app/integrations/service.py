@@ -71,6 +71,52 @@ class IntegrationEntry:
     connection: TenantIntegration | None
 
 
+#: The calendars a receptionist can book into, in the order one is chosen when
+#: a business has connected more than one.
+BOOKING_CALENDARS: tuple[IntegrationProvider, ...] = (
+    IntegrationProvider.GOOGLE_CALENDAR,
+    IntegrationProvider.MICROSOFT_OUTLOOK,
+)
+
+
+@dataclass(frozen=True, slots=True)
+class OpenCalendar:
+    """A connected calendar holding a token that is good for the next minute.
+
+    Opening one may commit, because a refreshed token is saved at once (see
+    ``_access_token``). Calls made through it never commit, except to record
+    that the connection broke — which is what lets a caller open the calendar
+    first and only then take a transaction-scoped lock around the calls.
+    """
+
+    service: IntegrationService
+    tenant: Tenant
+    provider: IntegrationProvider
+    adapter: CalendarIntegration
+    token: str
+
+    async def busy_intervals(self, *, start: datetime, end: datetime) -> list[BusyInterval]:
+        return await self.service._guarded(
+            self.tenant,
+            self.provider,
+            self.adapter.busy_intervals(access_token=self.token, start=start, end=end),
+        )
+
+    async def create_event(self, event: CalendarEvent) -> str:
+        return await self.service._guarded(
+            self.tenant,
+            self.provider,
+            self.adapter.create_event(access_token=self.token, event=event),
+        )
+
+    async def cancel_event(self, event_id: str) -> None:
+        await self.service._guarded(
+            self.tenant,
+            self.provider,
+            self.adapter.cancel_event(access_token=self.token, event_id=event_id),
+        )
+
+
 class IntegrationService:
     def __init__(
         self,
@@ -233,6 +279,42 @@ class IntegrationService:
         return row
 
     # ---- using -----------------------------------------------------------
+    async def booking_calendar(self, tenant: Tenant) -> IntegrationProvider | None:
+        """The calendar the receptionist books into, or ``None`` if there is none.
+
+        Connected *and* usable on this server: a connection whose OAuth client or
+        encryption key has since been removed from the deployment cannot be
+        called, so it does not count.
+        """
+        rows = (
+            (
+                await self.session.execute(
+                    select(TenantIntegration).where(
+                        TenantIntegration.tenant_id == tenant.id,
+                        TenantIntegration.provider.in_(BOOKING_CALENDARS),
+                        TenantIntegration.status == IntegrationStatus.CONNECTED,
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        connected = {row.provider for row in rows}
+        for provider in BOOKING_CALENDARS:
+            if (
+                provider in connected
+                and offered_to(provider, tenant.business_type)
+                and self.availability(provider) is Availability.AVAILABLE
+            ):
+                return provider
+        return None
+
+    async def open_calendar(self, tenant: Tenant, provider: IntegrationProvider) -> OpenCalendar:
+        adapter, token = await self._calendar(tenant, provider)
+        return OpenCalendar(
+            service=self, tenant=tenant, provider=provider, adapter=adapter, token=token
+        )
+
     async def busy_intervals(
         self, tenant: Tenant, provider: IntegrationProvider, *, start: datetime, end: datetime
     ) -> list[BusyInterval]:

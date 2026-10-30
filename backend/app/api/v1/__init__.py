@@ -25,6 +25,7 @@ from app.api.v1 import (
     tenants,
     transfers,
     voice,
+    voice_tools,
     webhooks,
     website,
 )
@@ -67,6 +68,9 @@ router.include_router(webhooks.router)
 # The audible call path. Unauthenticated like the webhooks, and verified the
 # same way — Twilio's signature is what stops anyone choosing whose agent answers.
 router.include_router(voice.router)
+# Called by the voice agent mid-call. Unauthenticated by session; each
+# business's tools carry their own credential, checked before anything is read.
+router.include_router(voice_tools.router)
 router.include_router(admin.router)
 
 __all__ = ["router"]

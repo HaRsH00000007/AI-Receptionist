@@ -14,7 +14,14 @@ from dataclasses import dataclass, field
 
 from app.core.errors import VendorError
 from app.providers.fakes.support import Behaviour, instance_token
-from app.providers.models import AgentRef, Delivery, PhoneNumberRef, TransferTarget, VoiceRef
+from app.providers.models import (
+    AgentRef,
+    Delivery,
+    PhoneNumberRef,
+    TransferTarget,
+    VoiceRef,
+    WebhookTool,
+)
 
 #: A stand-in catalogue, shaped like the real one.
 #:
@@ -106,6 +113,8 @@ class _StoredAgent:
     #: How the last push said to speak. ``None`` is the vendor's default, and a
     #: test can tell that apart from an explicit 1.0.
     delivery: Delivery | None = None
+    #: The workspace tools the last push attached. Replaced, never merged.
+    tool_ids: tuple[str, ...] = ()
 
     def to_ref(self) -> AgentRef:
         return AgentRef(
@@ -139,11 +148,14 @@ class FakeElevenLabsProvider:
     behaviour: Behaviour = field(default_factory=Behaviour)
     agents: dict[str, _StoredAgent] = field(default_factory=dict)
     phones: dict[str, _StoredPhone] = field(default_factory=dict)
+    #: Workspace tools by id, exactly as they were last written.
+    tools: dict[str, WebhookTool] = field(default_factory=dict)
     # Same reasoning as the Twilio fake: both of these land in UNIQUE
     # columns, so they must survive a worker restart without colliding.
     _token: str = field(default_factory=lambda: instance_token(8))
     _agent_counter: itertools.count[int] = field(default_factory=lambda: itertools.count(1))
     _phone_counter: itertools.count[int] = field(default_factory=lambda: itertools.count(1))
+    _tool_counter: itertools.count[int] = field(default_factory=lambda: itertools.count(1))
 
     # ---- voices ----------------------------------------------------------
     async def list_voices(self) -> Sequence[VoiceRef]:
@@ -160,6 +172,7 @@ class FakeElevenLabsProvider:
         voice_id: str,
         transfers: Sequence[TransferTarget] = (),
         delivery: Delivery | None = None,
+        tool_ids: Sequence[str] = (),
     ) -> AgentRef:
         self.behaviour.record("create_agent", name=name, voice_id=voice_id)
 
@@ -181,6 +194,7 @@ class FakeElevenLabsProvider:
             first_message=first_message,
             transfers=tuple(transfers),
             delivery=delivery,
+            tool_ids=self._known_tools(tool_ids),
         )
         self.agents[agent.agent_id] = agent
         return agent.to_ref()
@@ -207,6 +221,7 @@ class FakeElevenLabsProvider:
         voice_id: str,
         transfers: Sequence[TransferTarget] = (),
         delivery: Delivery | None = None,
+        tool_ids: Sequence[str] = (),
     ) -> AgentRef:
         self.behaviour.record("update_agent", agent_id=agent_id, transfers=len(transfers))
         agent = self.agents.get(agent_id)
@@ -226,6 +241,7 @@ class FakeElevenLabsProvider:
         # Replaced, never merged: the caller passes the complete set.
         agent.transfers = tuple(transfers)
         agent.delivery = delivery
+        agent.tool_ids = self._known_tools(tool_ids)
         return agent.to_ref()
 
     async def delete_agent(self, *, agent_id: str) -> None:
@@ -235,6 +251,34 @@ class FakeElevenLabsProvider:
         for phone in self.phones.values():
             if phone.assigned_agent_id == agent_id:
                 phone.assigned_agent_id = None
+
+    # ---- workspace tools -------------------------------------------------
+    def _known_tools(self, tool_ids: Sequence[str]) -> tuple[str, ...]:
+        """The vendor refuses an agent that references a tool it does not have."""
+        missing = [tool_id for tool_id in tool_ids if tool_id not in self.tools]
+        if missing:
+            raise VendorError(
+                "unknown tool id",
+                vendor=self.name,
+                status_code=422,
+                retryable=False,
+                code="tool_not_found",
+                details={"tool_ids": missing},
+            )
+        return tuple(tool_ids)
+
+    async def upsert_webhook_tool(self, *, tool_id: str | None, tool: WebhookTool) -> str:
+        self.behaviour.record("upsert_webhook_tool", tool_id=tool_id, name=tool.name)
+        if tool_id and tool_id in self.tools:
+            self.tools[tool_id] = tool
+            return tool_id
+        created = f"tool_{self._token}{next(self._tool_counter):08d}"
+        self.tools[created] = tool
+        return created
+
+    async def delete_tool(self, *, tool_id: str) -> None:
+        self.behaviour.record("delete_tool", tool_id=tool_id)
+        self.tools.pop(tool_id, None)
 
     # ---- phone numbers ---------------------------------------------------
     async def import_phone_number(

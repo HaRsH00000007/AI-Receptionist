@@ -24,11 +24,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import Settings
 from app.core.logging import get_logger
 from app.models import Agent, AgentConfig, BusinessProfile, Tenant
+from app.models.enums import AgentStatus
 from app.models.greeting_rule import GreetingRule
 from app.models.identity import User
 from app.models.transfer_rule import TransferRule
 from app.providers.models import Delivery
 from app.providers.protocols import ElevenLabsProvider, LLMProvider
+from app.services.calendar_tools import finish_tools, plan_tools
 from app.services.config_generator import (
     ConfigGenerator,
     GenerationOutcome,
@@ -201,6 +203,7 @@ async def generate_and_publish(
 
 async def push_config_to_agent(
     *,
+    session: AsyncSession,
     settings: Settings,
     voice: ElevenLabsProvider,
     tenant: Tenant,
@@ -223,6 +226,12 @@ async def push_config_to_agent(
     would silently cancel a tenant's lunch-hour greeting every time they edited
     anything else. What was sent is recorded on the agent so the worker's sweep
     can tell whether the projection still matches the clock.
+
+    The booking tools are resolved here for the same reason
+    (:mod:`app.services.calendar_tools`): the push is the complete set of tools,
+    so a caller that skipped this step would strip a connected business's
+    receptionist of its ability to book. ``session`` is what reads whether the
+    business has a calendar.
     """
     assert agent.elevenlabs_agent_id, "push_config_to_agent needs a vendor agent id"
     assert not agent.is_shared, "never push one tenant's config onto a shared agent"
@@ -234,10 +243,12 @@ async def push_config_to_agent(
         default=config.first_message,
     )
 
+    tools = await plan_tools(session, settings=settings, voice=voice, tenant=tenant, agent=agent)
+
     await voice.update_agent(
         agent_id=agent.elevenlabs_agent_id,
         name=tenant_resource_name(tenant.id),
-        system_prompt=config.system_prompt,
+        system_prompt=config.system_prompt + tools.prompt_addendum,
         first_message=greeting,
         voice_id=config.voice_id or settings.elevenlabs_default_voice_id,
         delivery=delivery_of_config(config.model_params_json),
@@ -246,7 +257,9 @@ async def push_config_to_agent(
         # restores the destinations that version was published with rather than
         # whatever the rules happen to say now.
         transfers=targets_of_config(config.model_params_json),
+        tool_ids=tools.tool_ids,
     )
+    await finish_tools(voice, agent, tools)
     agent.agent_config_id = config.id
     agent.greeting_in_effect = greeting
     agent.synced_at = datetime.now(UTC)
@@ -256,5 +269,57 @@ async def push_config_to_agent(
             "tenant_id": str(tenant.id),
             "config_version": config.version,
             "scheduled_greeting": scheduled is not None,
+            "booking_tools": bool(tools.tool_ids),
         },
     )
+
+
+async def resync_tenant_agent(
+    session: AsyncSession,
+    *,
+    settings: Settings,
+    voice: ElevenLabsProvider,
+    tenant: Tenant,
+) -> bool:
+    """Re-push a business's own agent from its live version.
+
+    For changes that alter what the agent *can do* without publishing a new
+    version — today, a calendar connected or disconnected, which adds or
+    removes the booking tools. Best effort and reported by its return value:
+    the change that prompted it has already happened, and the next push of any
+    kind carries the tools anyway. Shared agents are skipped, as everywhere.
+    """
+    agent = (
+        await session.execute(
+            select(Agent)
+            .where(Agent.tenant_id == tenant.id)
+            .where(Agent.status == AgentStatus.ACTIVE)
+        )
+    ).scalar_one_or_none()
+    if agent is None or not agent.elevenlabs_agent_id or agent.is_shared:
+        return False
+    config = (
+        await session.execute(
+            select(AgentConfig)
+            .where(AgentConfig.tenant_id == tenant.id)
+            .where(AgentConfig.is_live.is_(True))
+        )
+    ).scalar_one_or_none()
+    if config is None:
+        return False
+    try:
+        await push_config_to_agent(
+            session=session,
+            settings=settings,
+            voice=voice,
+            tenant=tenant,
+            agent=agent,
+            config=config,
+        )
+    except Exception:
+        logger.exception(
+            "could not update the voice agent's booking tools",
+            extra={"tenant_id": str(tenant.id)},
+        )
+        return False
+    return True

@@ -116,7 +116,11 @@ export function IntegrationsView() {
     if (!connected && !failed) return;
     announced.current = true;
     if (connected) {
-      toast({ tone: "success", title: "Connected", description: "Your integration is ready to use." });
+      toast({
+        tone: "success",
+        title: "Connected",
+        description: "Your receptionist can now check this calendar and book appointments into it.",
+      });
     } else if (failed) {
       toast({
         tone: "danger",
@@ -158,7 +162,7 @@ export function IntegrationsView() {
       toast({
         tone: "success",
         title: `${entry.name} is working`,
-        description: `Your receptionist can see your calendar: ${pluralize(result.busy_blocks, "busy block")} in the next 7 days.`,
+        description: `Your receptionist can see your calendar: ${pluralize(result.busy_blocks, "busy block")} in the next 7 days. It books callers into the free time.`,
       });
     } catch (caught) {
       toast({

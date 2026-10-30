@@ -153,6 +153,9 @@ class MicrosoftOutlook(CalendarIntegration):
                     "body": {"contentType": "text", "content": event.description},
                     "start": {"dateTime": iso_utc(event.start).rstrip("Z"), "timeZone": "UTC"},
                     "end": {"dateTime": iso_utc(event.end).rstrip("Z"), "timeZone": "UTC"},
+                    # Graph's own idempotency field: a second create carrying
+                    # the same transactionId returns the event the first made.
+                    **({"transactionId": event.idempotency_key} if event.idempotency_key else {}),
                 },
             )
         return str(body["id"])

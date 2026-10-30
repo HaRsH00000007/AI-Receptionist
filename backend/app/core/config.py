@@ -254,6 +254,19 @@ class Settings(BaseSettings):
     #: `common` accepts work, school and personal Microsoft accounts.
     microsoft_oauth_tenant: str = "common"
 
+    # ---- Appointment booking ----------------------------------------------
+    #: Whether a receptionist whose business has a connected calendar is given
+    #: the check-availability and book-appointment tools. Off removes them from
+    #: every agent on its next push; the calendar connection itself is kept.
+    calendar_booking_enabled: bool = True
+    #: How long a booked appointment is, and the step between offered slots.
+    booking_slot_minutes: int = Field(default=30, ge=10, le=240)
+    #: The soonest a caller may book, so nobody is booked into a slot that has
+    #: started before the owner could possibly see it.
+    booking_min_notice_minutes: int = Field(default=60, ge=0, le=7 * 24 * 60)
+    #: The furthest ahead a caller may book.
+    booking_horizon_days: int = Field(default=60, ge=1, le=365)
+
     # ---- Admin -----------------------------------------------------------
     #: Shared secret for /admin routes. Not an auth system — just enough that
     #: the retry and abandon actions are not open to the internet.

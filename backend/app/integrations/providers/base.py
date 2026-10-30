@@ -74,6 +74,11 @@ class CalendarEvent:
     start: datetime
     end: datetime
     description: str = ""
+    #: The same key for the same booking, however many times it is attempted.
+    #: Lowercase hex, so it is also a valid Google event id. Adapters use it to
+    #: make a retried create — after a timeout, say, where the first attempt
+    #: may have succeeded — find the first event instead of adding a second.
+    idempotency_key: str | None = None
 
 
 class OAuthIntegration(ABC):

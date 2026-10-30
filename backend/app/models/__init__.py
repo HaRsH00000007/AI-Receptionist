@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from app.models.agent import Agent
 from app.models.agent_config import AgentConfig
+from app.models.appointment import Appointment
 from app.models.audit import AuditLog
 from app.models.auth_token import AuthToken
 from app.models.billing import BillingEvent, Subscription
@@ -39,6 +40,7 @@ from app.models.website_onboarding import WebsiteOnboarding
 __all__ = [
     "Agent",
     "AgentConfig",
+    "Appointment",
     "AuditLog",
     "AuthToken",
     "BillingEvent",

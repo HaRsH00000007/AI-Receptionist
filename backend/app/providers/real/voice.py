@@ -6,7 +6,7 @@ authoring; the fake provider is what CI exercises, and the response parsing is
 written defensively so a renamed field degrades to ``None`` rather than a crash.
 Point ``ELEVENLABS_PROVIDER=elevenlabs`` at a real key to try it — see README.
 
-Three exceptions to that.
+Four exceptions to that.
 
 ``tts.speed`` and ``turn.turn_eagerness`` **have** been checked against the live
 API, on a throwaway agent that was created, written to, read back and deleted.
@@ -26,6 +26,12 @@ live API, on a throwaway agent. The vendor accepted the payload as written and
 stored both transfer types (``warm`` as ``conference``, ``cold`` as ``blind``),
 a later push with no transfers cleared ``transfer_to_number`` to ``null``, and
 ``end_call`` survived both — which is what sending the object whole is for.
+
+The workspace tools (``upsert_webhook_tool``, ``delete_tool`` and ``tool_ids``
+on the agent) **have** been checked against the live API the same way, on a
+throwaway tool and agent: the vendor stored the URL, method, header, required
+list and the ``system__`` dynamic variables exactly as sent, patched the tool in
+place, attached and detached it by id, and kept ``end_call`` throughout.
 """
 
 from __future__ import annotations
@@ -36,7 +42,14 @@ from typing import Any
 from app.core.config import Settings
 from app.core.errors import VendorError
 from app.providers.http import ProviderHTTPClient
-from app.providers.models import AgentRef, Delivery, PhoneNumberRef, TransferTarget, VoiceRef
+from app.providers.models import (
+    AgentRef,
+    Delivery,
+    PhoneNumberRef,
+    TransferTarget,
+    VoiceRef,
+    WebhookTool,
+)
 
 
 def _text(value: Any) -> str | None:
@@ -180,6 +193,7 @@ class ElevenLabsRestProvider:
         voice_id: str,
         transfers: Sequence[TransferTarget] = (),
         delivery: Delivery | None = None,
+        tool_ids: Sequence[str] = (),
     ) -> dict[str, Any]:
         tts: dict[str, Any] = {"voice_id": voice_id}
         conversation: dict[str, Any] = {
@@ -187,6 +201,9 @@ class ElevenLabsRestProvider:
                 "prompt": {
                     "prompt": system_prompt,
                     "built_in_tools": self._built_in_tools(transfers),
+                    # The complete set, like the built-in tools: an empty list
+                    # is how disconnecting a calendar takes booking away.
+                    "tool_ids": list(tool_ids),
                 },
                 "first_message": first_message,
                 "language": "en",
@@ -212,6 +229,7 @@ class ElevenLabsRestProvider:
         voice_id: str,
         transfers: Sequence[TransferTarget] = (),
         delivery: Delivery | None = None,
+        tool_ids: Sequence[str] = (),
     ) -> AgentRef:
         payload = await self._client.post(
             "/v1/convai/agents/create",
@@ -222,6 +240,7 @@ class ElevenLabsRestProvider:
                 voice_id=voice_id,
                 transfers=transfers,
                 delivery=delivery,
+                tool_ids=tool_ids,
             ),
         )
         if not payload or "agent_id" not in payload:
@@ -296,6 +315,7 @@ class ElevenLabsRestProvider:
         voice_id: str,
         transfers: Sequence[TransferTarget] = (),
         delivery: Delivery | None = None,
+        tool_ids: Sequence[str] = (),
     ) -> AgentRef:
         await self._client.patch(
             f"/v1/convai/agents/{agent_id}",
@@ -306,6 +326,7 @@ class ElevenLabsRestProvider:
                 voice_id=voice_id,
                 transfers=transfers,
                 delivery=delivery,
+                tool_ids=tool_ids,
             ),
         )
         updated = await self.get_agent(agent_id=agent_id)
@@ -322,6 +343,75 @@ class ElevenLabsRestProvider:
     async def delete_agent(self, *, agent_id: str) -> None:
         try:
             await self._client.delete(f"/v1/convai/agents/{agent_id}", expected=(200, 204))
+        except VendorError as exc:
+            if exc.status_code == 404:
+                return
+            raise
+
+    # ---- workspace tools -------------------------------------------------
+    @staticmethod
+    def _tool_config(tool: WebhookTool) -> dict[str, Any]:
+        """A webhook tool as the vendor stores it.
+
+        Each body property carries exactly one of a description (the model fills
+        it in) or a dynamic variable (the vendor does), which is the vendor's
+        own rule for a property.
+        """
+        properties: dict[str, Any] = {}
+        for parameter in tool.parameters:
+            entry: dict[str, Any] = {"type": parameter.type}
+            if parameter.dynamic_variable:
+                entry["dynamic_variable"] = parameter.dynamic_variable
+            else:
+                entry["description"] = parameter.description
+            properties[parameter.name] = entry
+        return {
+            "type": "webhook",
+            "name": tool.name,
+            "description": tool.description,
+            "response_timeout_secs": tool.timeout_s,
+            "api_schema": {
+                "url": tool.url,
+                "method": "POST",
+                "request_headers": dict(tool.headers),
+                "request_body_schema": {
+                    "type": "object",
+                    "description": tool.description,
+                    "properties": properties,
+                    "required": [
+                        parameter.name
+                        for parameter in tool.parameters
+                        if parameter.required and not parameter.dynamic_variable
+                    ],
+                },
+            },
+        }
+
+    async def upsert_webhook_tool(self, *, tool_id: str | None, tool: WebhookTool) -> str:
+        body = {"tool_config": self._tool_config(tool)}
+        if tool_id:
+            try:
+                await self._client.patch(f"/v1/convai/tools/{tool_id}", json=body)
+                return tool_id
+            except VendorError as exc:
+                if exc.status_code != 404:
+                    raise
+                # Deleted at the vendor by hand; make it again below.
+        payload = await self._client.post("/v1/convai/tools", json=body)
+        created = (payload or {}).get("id") or (payload or {}).get("tool_id")
+        if not created:
+            raise VendorError(
+                "elevenlabs created a tool without an id",
+                vendor=self.name,
+                retryable=False,
+                code="vendor_bad_response",
+                details={"keys": sorted(payload or {})[:20]},
+            )
+        return str(created)
+
+    async def delete_tool(self, *, tool_id: str) -> None:
+        try:
+            await self._client.delete(f"/v1/convai/tools/{tool_id}", expected=(200, 204))
         except VendorError as exc:
             if exc.status_code == 404:
                 return

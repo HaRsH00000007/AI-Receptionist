@@ -31,6 +31,7 @@ from app.providers.models import (
     SubscriptionRef,
     TransferTarget,
     VoiceRef,
+    WebhookTool,
 )
 
 
@@ -99,6 +100,7 @@ class ElevenLabsProvider(Protocol):
         voice_id: str,
         transfers: Sequence[TransferTarget] = (),
         delivery: Delivery | None = None,
+        tool_ids: Sequence[str] = (),
     ) -> AgentRef: ...
 
     async def get_agent(self, *, agent_id: str) -> AgentRef | None: ...
@@ -126,6 +128,7 @@ class ElevenLabsProvider(Protocol):
         voice_id: str,
         transfers: Sequence[TransferTarget] = (),
         delivery: Delivery | None = None,
+        tool_ids: Sequence[str] = (),
     ) -> AgentRef:
         """Push our config onto an existing agent. Backs ``resync_agent``.
 
@@ -135,10 +138,26 @@ class ElevenLabsProvider(Protocol):
         would make deleting a business's last transfer rule a no-op at the
         vendor, and callers would still be forwarded to a number the owner
         believes they removed.
+
+        ``tool_ids`` follows the same rule: the complete set of workspace tools
+        the agent may call, so an empty sequence detaches every one.
         """
         ...
 
     async def delete_agent(self, *, agent_id: str) -> None: ...
+
+    async def upsert_webhook_tool(self, *, tool_id: str | None, tool: WebhookTool) -> str:
+        """Create a workspace tool, or overwrite the one at ``tool_id``.
+
+        Returns the id to reference it by. An id the vendor no longer has is
+        not an error: the tool is created again and the new id returned, so a
+        tool deleted by hand at the vendor heals on the next push.
+        """
+        ...
+
+    async def delete_tool(self, *, tool_id: str) -> None:
+        """Remove a workspace tool. Idempotent: a missing tool is not an error."""
+        ...
 
     async def import_phone_number(
         self,

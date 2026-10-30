@@ -77,6 +77,8 @@ EXPECTED_TABLES = {
     # ---- labelling calls ----
     "call_tags",
     "call_tag_assignments",
+    # ---- appointments the receptionist booked into a connected calendar ----
+    "appointments",
 }
 
 

@@ -99,6 +99,7 @@ async def sweep_scheduled_greetings(
 
         try:
             await push_config_to_agent(
+                session=session,
                 settings=settings,
                 voice=providers.elevenlabs,
                 tenant=tenant,

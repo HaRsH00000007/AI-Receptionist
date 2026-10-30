@@ -129,6 +129,39 @@ class TransferTarget(ProviderModel):
     kind: Literal["warm", "cold"] = "warm"
 
 
+class ToolParameter(ProviderModel):
+    """One field of the JSON body a webhook tool sends."""
+
+    name: str
+    type: Literal["string", "integer", "number", "boolean"] = "string"
+    #: What the model reads to decide what to put here.
+    description: str = ""
+    required: bool = False
+    #: Filled in by the vendor rather than the model — a system variable such
+    #: as ``system__conversation_id``. The model cannot see or change it, which
+    #: is why anything that identifies the call comes from here and never from
+    #: what the model was told.
+    dynamic_variable: str | None = None
+
+
+class WebhookTool(ProviderModel):
+    """A server tool the voice agent may call mid-conversation.
+
+    The provider layer's own shape: an adapter turns it into whatever the vendor
+    stores. ``headers`` carries the per-tenant credential the endpoint checks,
+    so it is excluded from ``repr`` and therefore from every log line and
+    traceback that prints one of these.
+    """
+
+    name: str
+    description: str
+    url: str
+    headers: dict[str, str] = Field(default_factory=dict, repr=False)
+    parameters: tuple[ToolParameter, ...] = ()
+    #: How long the vendor waits for the endpoint before giving up on the call.
+    timeout_s: int = 20
+
+
 class PhoneNumberRef(ProviderModel):
     """A phone number as ElevenLabs sees it, after import."""
 

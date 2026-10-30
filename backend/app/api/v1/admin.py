@@ -247,6 +247,7 @@ async def resync_agent(
         raise NotFoundError("tenant has no live config", details={"tenant_id": str(tenant_id)})
 
     await push_config_to_agent(
+        session=session,
         settings=settings,
         voice=providers.elevenlabs,
         tenant=tenant,

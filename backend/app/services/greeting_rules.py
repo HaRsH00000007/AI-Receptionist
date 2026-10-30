@@ -318,6 +318,7 @@ class GreetingRuleService:
 
         try:
             await push_config_to_agent(
+                session=self.session,
                 settings=self.settings,
                 voice=self.providers.elevenlabs,
                 tenant=tenant,

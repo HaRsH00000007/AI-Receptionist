@@ -27,7 +27,7 @@ from fastapi import APIRouter, Cookie, Query, Request
 from fastapi.responses import RedirectResponse
 
 from app.api.auth_deps import RequireAdmin, RequireMember
-from app.api.deps import SettingsDep
+from app.api.deps import ProvidersDep, SettingsDep
 from app.core.config import Settings
 from app.core.errors import AppError, AuthenticationError, AuthorizationError, NotFoundError
 from app.core.logging import get_logger
@@ -44,6 +44,7 @@ from app.schemas.portal import (
 )
 from app.services.audit import Actor
 from app.services.auth import AuthService, Principal
+from app.services.config_publishing import resync_tenant_agent
 
 logger = get_logger(__name__)
 
@@ -169,6 +170,7 @@ async def disconnect_integration(
     request: Request,
     session: SessionDep,
     settings: SettingsDep,
+    providers: ProvidersDep,
 ) -> IntegrationView:
     tenant = await _tenant(session, principal)
     chosen = _provider(provider)
@@ -176,6 +178,11 @@ async def disconnect_integration(
     await service.disconnect(
         tenant, chosen, actor=Actor(user=principal.user, actor_type=principal.actor_type)
     )
+    # The receptionist loses its booking tools now, not at the owner's next
+    # edit: until then it would offer times from a calendar we can no longer
+    # write to. Flushed first so the push sees the disconnection.
+    await session.flush()
+    await resync_tenant_agent(session, settings=settings, voice=providers.elevenlabs, tenant=tenant)
     return _view(await service.entry(tenant, chosen))
 
 
@@ -227,6 +234,7 @@ async def oauth_callback(
     request: Request,
     session: SessionDep,
     settings: SettingsDep,
+    providers: ProvidersDep,
     code: Annotated[str | None, Query(max_length=2048)] = None,
     state: Annotated[str | None, Query(max_length=2048)] = None,
     error: Annotated[str | None, Query(max_length=200)] = None,
@@ -308,4 +316,10 @@ async def oauth_callback(
         return _back_to_dashboard(settings, integration=chosen.value, integration_error=reason)
 
     await session.commit()
+    # Committed first: the connection stands whether or not the agent can be
+    # updated right now. Then the receptionist is given the booking tools.
+    if await resync_tenant_agent(
+        session, settings=settings, voice=providers.elevenlabs, tenant=tenant
+    ):
+        await session.commit()
     return _back_to_dashboard(settings, integration=chosen.value, connected=chosen.value)

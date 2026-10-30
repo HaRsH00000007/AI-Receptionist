@@ -12,6 +12,7 @@ from datetime import datetime
 from typing import Any
 from urllib.parse import urlencode
 
+from app.core.errors import VendorError
 from app.integrations.providers.base import (
     BusyInterval,
     CalendarEvent,
@@ -136,16 +137,24 @@ class GoogleCalendar(CalendarIntegration):
         ]
 
     async def create_event(self, *, access_token: str, event: CalendarEvent) -> str:
+        payload: dict[str, Any] = {
+            "summary": event.title,
+            "description": event.description,
+            "start": {"dateTime": iso_utc(event.start)},
+            "end": {"dateTime": iso_utc(event.end)},
+        }
+        if event.idempotency_key:
+            # Google lets the client choose the id (a-v and 0-9, which hex is
+            # within) and answers 409 if it already exists. That 409 is the
+            # proof a previous attempt created this exact event.
+            payload["id"] = event.idempotency_key
         async with self._client(CALENDAR_BASE, access_token) as http:
-            body = await http.post(
-                "/calendars/primary/events",
-                json={
-                    "summary": event.title,
-                    "description": event.description,
-                    "start": {"dateTime": iso_utc(event.start)},
-                    "end": {"dateTime": iso_utc(event.end)},
-                },
-            )
+            try:
+                body = await http.post("/calendars/primary/events", json=payload)
+            except VendorError as exc:
+                if exc.status_code == 409 and event.idempotency_key:
+                    return event.idempotency_key
+                raise
         return str(body["id"])
 
     async def cancel_event(self, *, access_token: str, event_id: str) -> None:
