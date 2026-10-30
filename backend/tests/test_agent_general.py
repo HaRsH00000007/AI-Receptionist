@@ -342,3 +342,130 @@ async def test_an_empty_sign_off_removes_it(api_client: AsyncClient, api_app: Fa
             )
         ).scalar_one()
     assert "Ending the call:" not in config.system_prompt
+
+
+# ---------------------------------------------------------------------------
+# Personality: how it sounds, rather than what it says
+# ---------------------------------------------------------------------------
+
+
+async def _pushed(api_app: FastAPI, tenant_id: Any) -> Any:
+    """What the voice agent currently holds, as the fake vendor recorded it."""
+    from sqlalchemy import select as _select
+
+    from app.models import Agent
+
+    async with api_app.state.session_factory() as session:
+        agent = (
+            await session.execute(_select(Agent).where(Agent.tenant_id == tenant_id))
+        ).scalar_one()
+        agent_id = agent.elevenlabs_agent_id
+    assert agent_id
+    return api_app.state.providers.elevenlabs.agents[agent_id]
+
+
+async def test_the_talking_speed_reaches_the_voice_agent(
+    api_client: AsyncClient, api_app: FastAPI
+) -> None:
+    """It is the vendor's own ``tts.speed``, so the proof is on the agent."""
+    owner = await live_owner(api_client, api_app)
+
+    response = await _save(api_client, owner, _edit(speaking_speed=0.85))
+
+    assert response.status_code == 200, response.text
+    assert (await _profile(api_app, owner.tenant_id)).speaking_speed == 0.85
+    assert (await _pushed(api_app, owner.tenant_id)).delivery.speed == 0.85
+
+
+async def test_a_speed_the_vendor_would_refuse_is_refused_here(
+    api_client: AsyncClient, api_app: FastAPI
+) -> None:
+    """ElevenLabs rejects anything outside 0.7 to 1.2 by name — checked against
+    the live API. Storing one would be a 422 on every publish from then on."""
+    owner = await live_owner(api_client, api_app)
+
+    too_fast = await _save(api_client, owner, _edit(speaking_speed=2.5))
+    too_slow = await _save(api_client, owner, _edit(speaking_speed=0.5))
+
+    assert too_fast.status_code == 422, too_fast.text
+    assert too_slow.status_code == 422, too_slow.text
+
+
+async def test_responsiveness_is_sent_in_the_vendors_own_words(
+    api_client: AsyncClient, api_app: FastAPI
+) -> None:
+    """``low`` is our word; ``patient`` is the only one the vendor accepts.
+
+    It refuses ``low`` and ``high`` outright, which is why the translation
+    happens before the adapter rather than inside the UI.
+    """
+    owner = await live_owner(api_client, api_app)
+
+    response = await _save(api_client, owner, _edit(responsiveness="low"))
+
+    assert response.status_code == 200, response.text
+    assert (await _pushed(api_app, owner.tenant_id)).delivery.eagerness == "patient"
+
+
+async def test_auto_sends_the_vendors_recommended_setting(
+    api_client: AsyncClient, api_app: FastAPI
+) -> None:
+    owner = await live_owner(api_client, api_app)
+
+    await _save(api_client, owner, _edit(responsiveness="auto"))
+
+    assert (await _pushed(api_app, owner.tenant_id)).delivery.eagerness == "normal"
+
+
+async def test_a_receptionist_that_chose_neither_is_left_to_the_vendors_defaults(
+    api_client: AsyncClient, api_app: FastAPI
+) -> None:
+    """Nothing is sent rather than "1.0" and "normal".
+
+    A reset would otherwise be indistinguishable from a choice in the vendor's
+    own record of the agent.
+    """
+    owner = await live_owner(api_client, api_app)
+
+    pushed = await _pushed(api_app, owner.tenant_id)
+
+    assert pushed.delivery is None or (
+        pushed.delivery.speed is None and pushed.delivery.eagerness is None
+    )
+
+
+async def test_the_personality_travels_on_the_version_so_a_rollback_restores_it(
+    api_client: AsyncClient, api_app: FastAPI
+) -> None:
+    """A rollback has to restore how it sounded, not only what it said."""
+    from app.services.config_publishing import delivery_of_config
+
+    owner = await live_owner(api_client, api_app)
+    await _save(api_client, owner, _edit(speaking_speed=1.1, responsiveness="high"))
+
+    async with api_app.state.session_factory() as session:
+        config = (
+            await session.execute(
+                select(AgentConfig)
+                .where(AgentConfig.tenant_id == owner.tenant_id)
+                .where(AgentConfig.is_live.is_(True))
+            )
+        ).scalar_one()
+
+    delivery = delivery_of_config(config.model_params_json)
+    assert delivery.speed == 1.1
+    assert delivery.eagerness == "eager"
+
+
+async def test_changing_the_tone_publishes_and_is_kept(
+    api_client: AsyncClient, api_app: FastAPI
+) -> None:
+    """The tone was only editable from the Training panel before this."""
+    owner = await live_owner(api_client, api_app)
+    before = await _live_version(api_app, owner.tenant_id)
+
+    response = await _save(api_client, owner, _edit(greeting_style="formal"))
+
+    assert response.status_code == 200, response.text
+    assert (await _profile(api_app, owner.tenant_id)).greeting_style.value == "formal"
+    assert await _live_version(api_app, owner.tenant_id) > before

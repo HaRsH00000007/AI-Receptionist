@@ -169,14 +169,42 @@ class CrawlSummaryView(BaseModel):
 class VoiceOptionView(BaseModel):
     """A voice this deployment can actually use.
 
-    Read from configuration, never invented: offering a voice that is not in
-    ``ELEVENLABS_VOICE_MAP`` would fail at the vendor on publish.
+    Everything describing it comes from the vendor's own catalogue — the name,
+    the sentence, the sample. Nothing here is written by us: a voice described
+    in our words goes stale the moment the vendor retunes it, and a sample we
+    generated would be a sample of a different model than the one that answers
+    the phone. See :mod:`app.services.voice_catalogue`.
+
+    Only the first three fields are guaranteed. A deployment that cannot reach
+    the catalogue still offers its configured voices, with no name, no sample
+    and no sentence — fewer options and a working form, rather than invented
+    copy.
     """
 
     voice_id: str
+    #: The short name: "Sarah", not "Sarah - Mature, Reassuring, Confident".
     label: str
     #: The greeting style this voice is the default for, when it is one.
     style: str | None
+    #: The line under the name: "American · Warm and friendly female voice".
+    summary: str = ""
+    #: The vendor's full sentence, shown when a customer opens the full list.
+    description: str | None = None
+    accent: str | None = None
+    gender: str | None = None
+    age: str | None = None
+    #: Two-letter code. Only English is offered while the call path sends it.
+    language: str = "en"
+    #: A public MP3, played in the browser. ``None`` when there is no sample,
+    #: which the picker says rather than showing a play button that does
+    #: nothing.
+    preview_url: str | None = None
+    #: Whether to show this one before the customer asks for the full list.
+    recommended: bool = False
+    #: Which drawn face represents this voice. Chosen from the vendor's own
+    #: gender and age labels (:mod:`app.services.avatars`), so the picture on
+    #: the card matches the voice a caller will hear.
+    avatar: str = ""
 
 
 class WebsiteSetupView(BaseModel):

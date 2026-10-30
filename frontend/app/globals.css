@@ -69,6 +69,21 @@
   --shadow-lg: 0 2px 4px rgb(12 15 26 / 0.04), 0 24px 48px -16px rgb(12 15 26 / 0.2);
   --shadow-xl: 0 4px 8px rgb(12 15 26 / 0.04), 0 40px 80px -24px rgb(12 15 26 / 0.28);
   --ring: 0 0 0 3px rgb(39 67 227 / 0.22);
+
+  /* Agent avatars.
+   *
+   * One hue per avatar; the silhouette is drawn in it and the disc behind is
+   * the same hue mixed into the surface, so an avatar needs no second token
+   * and follows the theme into dark mode on its own. Deliberately desaturated
+   * to sit beside one accent rather than compete with it. */
+  --avatar-indigo: #2743e3;
+  --avatar-moss: #15704c;
+  --avatar-amber: #8a5406;
+  --avatar-rose: #a8365e;
+  --avatar-teal: #0e5f66;
+  --avatar-violet: #5a3bb0;
+  --avatar-azure: #1a5790;
+  --avatar-slate: #3c4252;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -115,6 +130,17 @@
     --shadow-lg: 0 2px 4px rgb(0 0 0 / 0.4), 0 24px 48px -16px rgb(0 0 0 / 0.7);
     --shadow-xl: 0 4px 8px rgb(0 0 0 / 0.4), 0 40px 80px -24px rgb(0 0 0 / 0.8);
     --ring: 0 0 0 3px rgb(129 148 255 / 0.3);
+
+    /* Lifted for a dark surface: the same hues at light-mode lightness read as
+     * mud on #11141b. */
+    --avatar-indigo: #8194ff;
+    --avatar-moss: #46cf95;
+    --avatar-amber: #eeb257;
+    --avatar-rose: #f186aa;
+    --avatar-teal: #4fc6ce;
+    --avatar-violet: #b092ff;
+    --avatar-azure: #74b6ef;
+    --avatar-slate: #a7aec0;
   }
 }
 
@@ -161,6 +187,17 @@
   --shadow-lg: 0 2px 4px rgb(0 0 0 / 0.4), 0 24px 48px -16px rgb(0 0 0 / 0.7);
   --shadow-xl: 0 4px 8px rgb(0 0 0 / 0.4), 0 40px 80px -24px rgb(0 0 0 / 0.8);
   --ring: 0 0 0 3px rgb(129 148 255 / 0.3);
+
+  /* Lifted for a dark surface: the same hues at light-mode lightness read as
+   * mud on #11141b. */
+  --avatar-indigo: #8194ff;
+  --avatar-moss: #46cf95;
+  --avatar-amber: #eeb257;
+  --avatar-rose: #f186aa;
+  --avatar-teal: #4fc6ce;
+  --avatar-violet: #b092ff;
+  --avatar-azure: #74b6ef;
+  --avatar-slate: #a7aec0;
 }
 
 @theme inline {

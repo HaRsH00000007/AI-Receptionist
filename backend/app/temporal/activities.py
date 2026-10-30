@@ -58,7 +58,7 @@ from app.provisioning.compensation import compensate_run
 from app.provisioning.context import StepContext
 from app.provisioning.registry import implementation_for
 from app.services.idempotency import step_idempotency_key
-from app.services.notifications import NotificationService
+from app.services.tenant_notifications import stage_provisioning_failure
 from app.temporal.shared import (
     ERROR_BILLING_BLOCKED,
     CompensationOutcome,
@@ -370,15 +370,12 @@ class ProvisioningActivities:
                 return
             reason = run.last_error or "provisioning failed"
 
-        try:
-            await NotificationService(self.providers.email, self.settings).send_failure(
-                tenant=tenant, reason=reason
-            )
-        except AppError as exc:
-            logger.warning(
-                "failure notification could not be sent",
-                extra={"run_id": payload.run_id, "code": exc.code},
-            )
+            # Queued inside the same session that read the run, and committed
+            # with it. The polling engine does the same thing in
+            # `_after_terminal_failure`, so both orchestrators leave an
+            # identical durable obligation rather than one sending inline.
+            await stage_provisioning_failure(session, self.settings, tenant=tenant, reason=reason)
+            await session.commit()
 
     @activity.defn(name="check_billing_entitlement")
     async def is_entitled(self, payload: ProvisionInput) -> bool:

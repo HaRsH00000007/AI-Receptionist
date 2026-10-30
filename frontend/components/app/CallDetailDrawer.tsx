@@ -12,6 +12,7 @@
 import type { ReactNode } from "react";
 
 import { Badge } from "@/components/ui/Badge";
+import { CallTagChip } from "@/components/app/CallTagChip";
 import { ButtonLink } from "@/components/ui/Button";
 import { CopyButton } from "@/components/ui/CopyButton";
 import { cx } from "@/components/ui/cx";
@@ -27,7 +28,13 @@ import { callerName } from "./CallList";
 import { useWorkspace } from "./TenantWorkspace";
 import { useLoad } from "./useLoad";
 
-export function CallDetailDrawer({ call, onClose }: { call: CallView | null; onClose: () => void }) {
+export function CallDetailDrawer({
+  call,
+  onClose,
+}: {
+  call: CallView | null;
+  onClose: () => void;
+}) {
   return (
     <Dialog
       open={call !== null}
@@ -64,6 +71,11 @@ function CallDetail({ call }: { call: CallView }) {
         </Badge>
         {urgent && <Badge tone="warn">Urgent</Badge>}
         {call.intent && <Badge tone="accent">{humanize(call.intent)}</Badge>}
+        {/* Beside the intent, not instead of it: the intent is one free-text
+            guess from the summary, these are the business's own closed set. */}
+        {call.tags.map((tag) => (
+          <CallTagChip key={tag.id} tag={tag} />
+        ))}
       </div>
 
       <section>
@@ -129,7 +141,9 @@ function CallDetail({ call }: { call: CallView }) {
               <Skeleton className="h-10 w-1/2 rounded-xl" />
             </div>
           ) : detail.error ? (
-            <p className="text-sm text-muted">The transcript couldn&apos;t be loaded. {detail.error}</p>
+            <p className="text-sm text-muted">
+              The transcript couldn&apos;t be loaded. {detail.error}
+            </p>
           ) : full && full.transcript.length > 0 ? (
             <Transcript turns={full.transcript} />
           ) : (
@@ -163,12 +177,15 @@ function Transcript({ turns }: { turns: TranscriptTurnView[] }) {
             <div
               className={cx(
                 "max-w-[85%] rounded-2xl px-3.5 py-2.5 text-sm leading-relaxed",
-                agent ? "rounded-bl-md bg-surface-2 text-ink" : "rounded-br-md bg-accent-soft text-accent-ink",
+                agent
+                  ? "rounded-bl-md bg-surface-2 text-ink"
+                  : "rounded-br-md bg-accent-soft text-accent-ink",
               )}
             >
               <p className="text-[0.6875rem] font-semibold tracking-wide uppercase opacity-70">
                 {agent ? "Receptionist" : "Caller"}
-                {turn.time_in_call_s !== null && ` · ${formatDuration(Math.round(turn.time_in_call_s))}`}
+                {turn.time_in_call_s !== null &&
+                  ` · ${formatDuration(Math.round(turn.time_in_call_s))}`}
               </p>
               <p className="mt-0.5 whitespace-pre-wrap">{turn.message}</p>
             </div>

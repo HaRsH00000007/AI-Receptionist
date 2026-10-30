@@ -43,6 +43,7 @@ from app.schemas.views import (
     UsageView,
 )
 from app.services.billing_gate import BillingDecision, evaluate
+from app.services.call_tags import labels_for_calls, tagged_calls
 from app.services.usage import UsageService
 
 router = APIRouter(prefix="/tenants", tags=["tenants"])
@@ -100,6 +101,9 @@ async def get_profile(tenant_id: TenantReadDep, session: SessionDep) -> Business
         greeting_style=profile.greeting_style,
         custom_greeting=profile.greeting_custom,
         custom_goodbye=profile.goodbye_custom,
+        voice_id=profile.voice_id,
+        speaking_speed=profile.speaking_speed,
+        responsiveness=profile.responsiveness,
         escalation_raw=profile.escalation_raw,
         escalation=_stored(EscalationPolicy, profile.escalation_json),
         greeting=config.first_message if config else None,
@@ -251,11 +255,22 @@ async def list_calls(
         max_length=20,
         description="Only calls from this number (E.164), for a contact's history.",
     ),
+    tag: uuid.UUID | None = Query(
+        default=None,
+        description="Only calls carrying this tag. Another tenant's tag matches nothing.",
+    ),
 ) -> list[CallView]:
     await _load_tenant(session, tenant_id)
     query = select(Call).where(Call.tenant_id == tenant_id)
     if caller:
         query = query.where(Call.from_e164 == caller)
+    if tag:
+        # Filtered in the database rather than in the browser, so a page of
+        # results is a page of *matching* results rather than whatever survived
+        # the client's pass over the last hundred calls. The subquery is scoped
+        # to the tenant that owns the tag as well as to the tenant that owns the
+        # calls; see ``tagged_calls``.
+        query = query.where(Call.id.in_(tagged_calls(tenant_id, tag)))
     calls = (
         (
             await session.execute(
@@ -267,6 +282,7 @@ async def list_calls(
         .scalars()
         .all()
     )
+    labels = await labels_for_calls(session, [call.id for call in calls])
     return [
         CallView(
             id=call.id,
@@ -281,6 +297,7 @@ async def list_calls(
             callback_number=call.callback_number,
             intent=call.intent,
             urgency=call.urgency,
+            tags=labels.get(call.id, []),
         )
         for call in calls
     ]

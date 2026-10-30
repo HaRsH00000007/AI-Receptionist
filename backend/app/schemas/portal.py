@@ -17,7 +17,13 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 
-from app.models.enums import GreetingStyle, SmsBrandType, SmsRegistrationStatus, SmsUseCase
+from app.models.enums import (
+    GreetingStyle,
+    Responsiveness,
+    SmsBrandType,
+    SmsRegistrationStatus,
+    SmsUseCase,
+)
 from app.schemas.views import CallView
 
 # ---------------------------------------------------------------------------
@@ -142,6 +148,19 @@ class AgentSettingsUpdate(BaseModel):
     #: ``None`` means "leave it alone", which is different from "" meaning
     #: "remove the name".
     agent_name: str | None = Field(default=None, max_length=80)
+
+    #: How fast it talks. ``None`` leaves it alone; the vendor's own range is
+    #: 0.7 to 1.2 and it refuses anything else, so this does too.
+    speaking_speed: float | None = Field(default=None, ge=0.7, le=1.2)
+
+    #: How quickly it decides a caller has finished. ``None`` leaves it alone.
+    responsiveness: Responsiveness | None = None
+
+    #: The voice the receptionist speaks with. ``None`` leaves it unchanged.
+    #:
+    #: Validated against the live catalogue by the service, not here: which
+    #: voices exist is the vendor's answer, and a schema cannot ask it.
+    voice_id: str | None = Field(default=None, max_length=64)
 
     #: The business's IANA timezone. ``None`` leaves it unchanged.
     #:

@@ -10,9 +10,11 @@ from __future__ import annotations
 from app.models.agent import Agent
 from app.models.agent_config import AgentConfig
 from app.models.audit import AuditLog
+from app.models.auth_token import AuthToken
 from app.models.billing import BillingEvent, Subscription
 from app.models.business_profile import BusinessProfile
 from app.models.call import Call
+from app.models.call_tag import CallTag, CallTagAssignment
 from app.models.contact import Contact
 from app.models.greeting_rule import GreetingRule
 from app.models.identity import Membership, Session, User
@@ -38,9 +40,12 @@ __all__ = [
     "Agent",
     "AgentConfig",
     "AuditLog",
+    "AuthToken",
     "BillingEvent",
     "BusinessProfile",
     "Call",
+    "CallTag",
+    "CallTagAssignment",
     "Contact",
     "DataDeletionRequest",
     "GreetingRule",

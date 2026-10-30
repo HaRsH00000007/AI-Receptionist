@@ -288,3 +288,151 @@ async def test_a_summary_goes_only_to_its_own_tenant(worker_env: WorkerEnv) -> N
         for sent in worker_env.email.outbox
         if sent.to == first.contact_email
     )
+
+
+# ---------------------------------------------------------------------------
+# Tagging, which rides on this pipeline rather than beside it
+# ---------------------------------------------------------------------------
+async def _add_tag(
+    env: WorkerEnv, tenant_id: uuid.UUID, name: str, **overrides: object
+) -> uuid.UUID:
+    """A configured tag, written directly: the API is covered in its own file."""
+    from app.models import CallTag
+    from app.models.enums import TagColor
+
+    values: dict[str, object] = {
+        "tenant_id": tenant_id,
+        "name": name,
+        "description": f"the caller mentions {name}",
+        "color": TagColor.SLATE,
+        "enabled": True,
+        "position": 1,
+    }
+    values.update(overrides)
+    async with env.session_factory() as session:
+        tag = CallTag(**values)
+        session.add(tag)
+        await session.commit()
+        return tag.id
+
+
+async def _tags_on(env: WorkerEnv, call_id: uuid.UUID) -> set[uuid.UUID]:
+    from app.models import CallTagAssignment
+
+    async with env.session_factory() as session:
+        rows = (
+            await session.execute(
+                select(CallTagAssignment.tag_id).where(CallTagAssignment.call_id == call_id)
+            )
+        ).scalars()
+        return set(rows)
+
+
+async def test_a_call_is_labelled_with_the_tags_its_transcript_supports(
+    worker_env: WorkerEnv,
+) -> None:
+    """The fake classifier answers from the transcript it was given, so this is
+    a real classification rather than a scripted one."""
+    tenant_id, _ = await active_tenant(worker_env)
+    # "Jamie Rivera" is said in TRANSCRIPT; "Complaint" is not.
+    wanted = await _add_tag(worker_env, tenant_id, "Jamie Rivera")
+    unwanted = await _add_tag(worker_env, tenant_id, "Complaint", position=2)
+    call_id = await store_call(worker_env, tenant_id)
+
+    await worker_env.drain()
+
+    assert await _tags_on(worker_env, call_id) == {wanted}
+    assert unwanted not in await _tags_on(worker_env, call_id)
+
+
+async def test_a_disabled_tag_is_never_applied(worker_env: WorkerEnv) -> None:
+    tenant_id, _ = await active_tenant(worker_env)
+    await _add_tag(worker_env, tenant_id, "Jamie Rivera", enabled=False)
+    call_id = await store_call(worker_env, tenant_id)
+
+    await worker_env.drain()
+
+    assert await _tags_on(worker_env, call_id) == set()
+
+
+async def test_a_business_with_no_tags_pays_for_one_model_call(worker_env: WorkerEnv) -> None:
+    """The summary, and nothing else. The classifier is skipped entirely."""
+    tenant_id, _ = await active_tenant(worker_env)
+    call_id = await store_call(worker_env, tenant_id)
+    before = worker_env.llm.behaviour.count("complete")
+
+    await worker_env.drain()
+
+    assert worker_env.llm.behaviour.count("complete") == before + 1
+    assert await _tags_on(worker_env, call_id) == set()
+
+
+async def test_tagging_is_not_repeated_when_the_job_retries(worker_env: WorkerEnv) -> None:
+    """A flaky mailer must not buy a second classification either.
+
+    The marker in ``transcript_json`` is what stops it; the assignment's
+    composite key is what makes a second write harmless if the marker is ever
+    lost. Both are deliberate — see ``CallProcessor._apply_tags``.
+    """
+    tenant_id, _ = await active_tenant(worker_env)
+    await _add_tag(worker_env, tenant_id, "Jamie Rivera")
+    call_id = await store_call(worker_env, tenant_id)
+
+    worker_env.email.behaviour.fail(
+        "send",
+        VendorError("mailer unwell", vendor="fake-email", status_code=503, retryable=True),
+        times=1,
+    )
+    before = worker_env.llm.behaviour.count("complete")
+
+    await worker_env.drain()
+
+    async with worker_env.session_factory() as session:
+        call = (await session.execute(select(Call).where(Call.id == call_id))).scalar_one()
+
+    assert call.status is CallStatus.NOTIFIED
+    # One summary and one classification, despite two notification attempts.
+    assert worker_env.llm.behaviour.count("complete") == before + 2
+    assert len(await _tags_on(worker_env, call_id)) == 1
+
+
+async def test_a_failing_classifier_does_not_cost_the_call_its_summary(
+    worker_env: WorkerEnv,
+) -> None:
+    """The isolation property, through the real pipeline.
+
+    Arranged so the failure lands on the *classifier's* model call and not the
+    summary's: the call is processed once with no tags, which caches the
+    summary, and only then is a tag added and the next model call made to fail.
+    ``_ensure_summary`` short-circuits on the cached summary, so the one call
+    that happens is the classification — and it raises.
+
+    A label is a convenience; the summary and the email are obligations.
+    """
+    tenant_id, _ = await active_tenant(worker_env)
+    call_id = await store_call(worker_env, tenant_id)
+    await worker_env.drain()
+
+    await _add_tag(worker_env, tenant_id, "Jamie Rivera")
+    async with worker_env.session_factory() as session:
+        call = (await session.execute(select(Call).where(Call.id == call_id))).scalar_one()
+        # Put it back in the queue with its summary already cached.
+        call.status = CallStatus.SUMMARIZED
+        call.next_attempt_at = None
+        await session.commit()
+
+    worker_env.llm.behaviour.fail(
+        "complete",
+        VendorError("model unwell", vendor="fake-llm", status_code=503, retryable=True),
+        times=1,
+    )
+
+    await worker_env.drain()
+
+    async with worker_env.session_factory() as session:
+        after = (await session.execute(select(Call).where(Call.id == call_id))).scalar_one()
+
+    assert after.summary, "the summary survived"
+    assert after.status is CallStatus.NOTIFIED, "and the call completed"
+    assert after.last_error is None, "a failed label is not a call failure"
+    assert await _tags_on(worker_env, call_id) == set(), "and no label was invented"

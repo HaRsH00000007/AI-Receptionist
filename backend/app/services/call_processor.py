@@ -22,15 +22,17 @@ from app.core.config import Settings
 from app.core.correlation import new_correlation_id, reset_correlation_id, set_correlation_id
 from app.core.errors import AppError
 from app.core.logging import get_logger
-from app.models import Call, Tenant
+from app.models import Call, CallTagAssignment, Tenant
 from app.models.enums import CallStatus, NotificationKind
 from app.providers.registry import Providers
 from app.provisioning.retry import next_attempt_at, should_retry
 from app.schemas.agent_config import CallSummary
+from app.services.call_tags import CallTagService
 from app.services.contacts import ContactService
 from app.services.email_templates import TEMPLATE_CALL_SUMMARY
 from app.services.notification_outbox import NotificationOutbox, call_summary_key
 from app.services.summarizer import Summarizer
+from app.services.tag_classifier import TagClassifier
 from app.services.usage import UsageService
 
 logger = get_logger(__name__)
@@ -129,6 +131,12 @@ class CallProcessor:
         except Exception as exc:  # noqa: BLE001 - classified below
             return await self._handle_failure(session, call.id, exc)
 
+        # Label the call against the business's own tags. After the summary,
+        # because the summary is context for it, and swallowed for the same
+        # reason the contact below is: a label is a convenience and must never
+        # cost the business its call record or its email.
+        await self._apply_tags(session, call, tenant)
+
         # Record the caller in the address book. Deliberately after the
         # summary, because that is where a name becomes available, and
         # deliberately swallowed: a contact is a convenience, and failing to
@@ -145,6 +153,74 @@ class CallProcessor:
             extra={"call_id": str(call.id), "tenant_id": str(tenant.id)},
         )
         return CallReport(call.id, "notified", call.status)
+
+    async def _apply_tags(self, session: AsyncSession, call: Call, tenant: Tenant) -> None:
+        """Classify the call against the tenant's tags, exactly once, never fatally.
+
+        **Retry behaviour.** A marker is written into ``transcript_json`` beside
+        the cached summary once the classifier has run, so a call that reaches
+        this step again — because the email provider failed and the job retried
+        — does not pay for a second model call. The marker records the ids that
+        were chosen, so it also survives as an explanation of why a call carries
+        the labels it does. If the transaction carrying it is lost the
+        classifier runs again, which costs one model call and writes the same
+        rows; the composite key below is what makes that harmless.
+
+        **Idempotency.** The assignment's primary key is ``(call_id, tag_id)``,
+        so re-running merges onto the rows it already wrote instead of
+        duplicating them.
+
+        **Isolation.** The writes happen inside a savepoint and every failure is
+        logged and dropped — with no ``session.rollback()``, deliberately: by
+        the time this runs the caller has already staged the notification on
+        this transaction, and rolling the session back would answer a failed
+        *label* by throwing away the customer's *email*. A savepoint undoes only
+        what this method did.
+
+        The model call itself is made outside the savepoint, so a slow vendor
+        does not hold a write transaction open while it thinks.
+        """
+        if (call.transcript_json or {}).get("tags_json") is not None:
+            return
+
+        try:
+            tags = await CallTagService(session).enabled(tenant.id)
+            if not tags:
+                # No tags configured: no model call, and no marker either, so a
+                # business that adds tags later is not locked out of labelling
+                # the calls it already has.
+                return
+
+            chosen = await TagClassifier(self.providers.llm, self.settings).classify(
+                tags=tags,
+                transcript=_transcript_text(call),
+                summary=call.summary,
+                business_name=tenant.name,
+                business_type=tenant.business_type.value,
+            )
+
+            async with session.begin_nested():
+                for tag_id in chosen:
+                    await session.merge(CallTagAssignment(call_id=call.id, tag_id=tag_id))
+                call.transcript_json = {
+                    **(call.transcript_json or {}),
+                    "tags_json": {"ids": [str(tag_id) for tag_id in chosen]},
+                }
+            logger.info(
+                "call tagged",
+                extra={
+                    "call_id": str(call.id),
+                    "tenant_id": str(tenant.id),
+                    "tags": len(chosen),
+                    "considered": len(tags),
+                },
+            )
+        except Exception:  # a label must never cost us a call record
+            logger.warning(
+                "could not tag a call; the call, its summary and its email are unaffected",
+                extra={"call_id": str(call.id), "tenant_id": str(tenant.id)},
+                exc_info=True,
+            )
 
     async def _capture_contact(self, session: AsyncSession, call: Call, tenant: Tenant) -> None:
         """Add or update the caller's contact record, never fatally.

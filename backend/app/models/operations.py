@@ -91,8 +91,15 @@ class Notification(UUIDPrimaryKeyMixin, TimestampMixin, Base):
 
     __tablename__ = "notifications"
 
-    tenant_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    #: Nullable, because not every message we owe someone is about a business.
+    #: A sign-in link, a password reset and a welcome email belong to an
+    #: *account*, which may belong to no tenant yet or to several — a new
+    #: registration has none at all. Requiring one here is what silently broke
+    #: magic-link delivery: the route had nothing truthful to put in the column,
+    #: put ``None`` in it, and the insert failed after the response had already
+    #: promised the customer an email.
+    tenant_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("tenants.id", ondelete="CASCADE"), nullable=True
     )
     call_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("calls.id", ondelete="SET NULL"), nullable=True

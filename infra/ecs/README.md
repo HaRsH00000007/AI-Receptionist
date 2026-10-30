@@ -83,6 +83,14 @@ environment with unsafe settings; see `Settings._production_hardening`.
 `DRY_RUN=false` comes last, after vendor webhooks are configured and
 `EMAIL_FROM` is on a domain verified with Resend.
 
+`EMAIL_FROM` is now **enforced**: with `EMAIL_PROVIDER=resend` and
+`DRY_RUN=false`, a free-mail or placeholder sender fails `Settings` validation
+and no container starts — including the one-off `ai-receptionist-migrate` task,
+which is the first thing `deploy.sh` runs. That is deliberate: Resend refuses
+every send from an unverified domain, so the alternative is a deploy that looks
+healthy and mails nobody. Fix the sender before deploying, or set
+`EMAIL_PROVIDER=fake` to deploy without email.
+
 ## Verifying
 
 ```bash

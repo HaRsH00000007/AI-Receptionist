@@ -42,6 +42,51 @@ DEFAULT_LLM_SUMMARY_MODEL = "claude-haiku-4-5-20251001"
 TwilioProviderName = Literal["fake", "twilio"]
 ElevenLabsProviderName = Literal["fake", "elevenlabs"]
 EmailProviderName = Literal["fake", "resend", "sendgrid", "smtp"]
+
+#: Domains whose DNS we could never be given control of, so an email provider
+#: that verifies senders by DNS can never be made to accept one. Not an
+#: exhaustive list of free mail — just the ones somebody actually reaches for
+#: when they need "an address" in a hurry, which is when this mistake is made.
+_FREE_MAIL_DOMAINS: frozenset[str] = frozenset(
+    {
+        "gmail.com",
+        "googlemail.com",
+        "yahoo.com",
+        "yahoo.co.uk",
+        "hotmail.com",
+        "outlook.com",
+        "live.com",
+        "msn.com",
+        "aol.com",
+        "icloud.com",
+        "me.com",
+        "mac.com",
+        "proton.me",
+        "protonmail.com",
+        "gmx.com",
+        "yandex.com",
+        "mail.com",
+        "zoho.com",
+        "rediffmail.com",
+    }
+)
+
+#: Reserved-for-documentation domains (RFC 2606) and the one Resend hands out
+#: for testing. A deploy that still carries one of these never had its sender
+#: configured; `resend.dev` in particular only delivers to the account owner's
+#: own address, so it looks configured and silently reaches nobody else.
+_PLACEHOLDER_DOMAINS: frozenset[str] = frozenset(
+    {"example.com", "example.net", "example.org", "localhost", "resend.dev", "test"}
+)
+
+
+def _bare_email(value: str) -> str:
+    """``Name <a@b.test>`` -> ``a@b.test``; a bare address is returned as given."""
+    if "<" in value and ">" in value:
+        return value[value.index("<") + 1 : value.index(">")].strip()
+    return value.strip()
+
+
 PaymentProviderName = Literal["fake", "stripe"]
 ObjectStorageProviderName = Literal["fake", "s3"]
 
@@ -323,6 +368,14 @@ class Settings(BaseSettings):
     session_ttl_s: int = Field(default=1_209_600, ge=300)  # 14 days
     #: Short by design: a magic link is a bearer credential sitting in an inbox.
     magic_link_ttl_s: int = Field(default=900, ge=60)
+    #: A reset link is the strongest credential we ever email — following it
+    #: sets the password — so it is short too. One hour rather than the link's
+    #: fifteen minutes because people ask for a reset, walk away, and come back.
+    password_reset_ttl_s: int = Field(default=3_600, ge=300, le=86_400)
+    #: Confirming an address proves nothing an attacker wants and unlocks
+    #: nothing, so this one is generous: a day, because the welcome email that
+    #: carries it is often read the next morning.
+    email_verification_ttl_s: int = Field(default=86_400, ge=3_600)
     #: Cookies are Secure everywhere except plain-HTTP local development.
     session_cookie_secure: bool = True
     session_cookie_samesite: Literal["lax", "strict", "none"] = "lax"
@@ -482,6 +535,47 @@ class Settings(BaseSettings):
         if missing:
             raise ValueError(
                 f"missing credentials for the selected providers: {', '.join(missing)}"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _sender_can_actually_send(self) -> Self:
+        """``EMAIL_FROM`` must be an address on a domain we could have verified.
+
+        Checked at boot, and fatal, for the same reason a missing API key is:
+        the alternative is a provider that accepts the request, refuses every
+        send, and leaves the failure in a log nobody reads. Resend and SendGrid
+        both require the ``from`` domain to be one you have proved you control
+        via DNS — so a free-mail address can *never* work, however valid it
+        looks, because nobody can add a DNS record to ``gmail.com``.
+
+        This is what was wrong in production: a real provider, a real key, and
+        a Gmail sender, which 403s on every single send.
+
+        Only enforced for the providers that have this rule. The fake accepts
+        anything, and SMTP is pointed at a local Mailpit that does not care.
+        """
+        if self.effective_email_provider not in {"resend", "sendgrid"}:
+            return self
+
+        address = _bare_email(self.email_from)
+        if "@" not in address:
+            raise ValueError(
+                'EMAIL_FROM must be an email address, optionally as "Name <user@domain>"'
+            )
+
+        domain = address.rsplit("@", 1)[1].lower()
+        if domain in _FREE_MAIL_DOMAINS:
+            raise ValueError(
+                f"EMAIL_FROM is on {domain}, which cannot be verified with "
+                f"{self.effective_email_provider}: sending requires a domain you "
+                "control the DNS for, and every send from a free-mail address is "
+                "refused. Use an address on your own verified domain."
+            )
+        if domain in _PLACEHOLDER_DOMAINS or domain.endswith(".invalid"):
+            raise ValueError(
+                f"EMAIL_FROM is still the placeholder {address}. Set it to an "
+                f"address on a domain verified with {self.effective_email_provider}."
             )
         return self
 

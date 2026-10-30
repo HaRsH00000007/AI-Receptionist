@@ -14,7 +14,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TenantWorkspace } from "@/components/app/TenantWorkspace";
 import { AgentGeneral } from "@/components/app/agent/AgentGeneral";
 import { AgentGreetings } from "@/components/app/agent/AgentGreetings";
+import { AgentTags } from "@/components/app/agent/AgentTags";
 import { AgentTransfers } from "@/components/app/agent/AgentTransfers";
+import { ReceptionistsView } from "@/components/app/views/ReceptionistsView";
 import { AgentView } from "@/components/app/views/AgentView";
 import { ContactsView } from "@/components/app/views/ContactsView";
 import { IntegrationsView } from "@/components/app/views/IntegrationsView";
@@ -26,6 +28,10 @@ import type {
   ContactView,
   GreetingRuleResult,
   GreetingRuleView,
+  CallTagsView,
+  CallTagView,
+  ReceptionistCardView,
+  VoiceOptionView,
   IntegrationView,
   SessionView,
   SmsStateView,
@@ -66,6 +72,12 @@ vi.mock("@/lib/api", async () => {
     submitSmsRegistration: vi.fn(),
     listConfigVersions: vi.fn(),
     listTimezones: vi.fn(),
+    listAgentVoices: vi.fn(),
+    listCallTags: vi.fn(),
+    createCallTag: vi.fn(),
+    updateCallTag: vi.fn(),
+    deleteCallTag: vi.fn(),
+    listReceptionists: vi.fn(),
     listGreetingRules: vi.fn(),
     createGreetingRule: vi.fn(),
     updateGreetingRule: vi.fn(),
@@ -219,6 +231,9 @@ function givenLiveTenant() {
     greeting_style: "formal",
     custom_greeting: null,
       custom_goodbye: null,
+      voice_id: null,
+    speaking_speed: null,
+    responsiveness: null,
     escalation_raw: null,
     escalation: null,
     greeting: "Good day, you have reached Careful Legal.",
@@ -1202,5 +1217,398 @@ describe("Agent / General — scheduled greetings", () => {
     expect(await screen.findByText(`“${LUNCH}”`)).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /add rule/i })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /actions for/i })).not.toBeInTheDocument();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Agent / General — the voice
+// ---------------------------------------------------------------------------
+
+function voice(overrides: Partial<VoiceOptionView> = {}): VoiceOptionView {
+  return {
+    voice_id: "v-sarah",
+    label: "Sarah",
+    style: "professional",
+    summary: "American · Mature, Reassuring, Confident",
+    description: "Young adult woman with a confident and warm, mature quality.",
+    accent: "American",
+    gender: "female",
+    age: "young",
+    language: "en",
+    preview_url: "https://example.invalid/sarah.mp3",
+    recommended: true,
+    avatar: "ada",
+    ...overrides,
+  };
+}
+
+/** Six recommended and one behind the fold, like a real catalogue. */
+function givenVoices(extra: VoiceOptionView[] = []) {
+  const recommended = ["Sarah", "Jessica", "Tiffany", "Finn", "Mark", "Eric"].map((name) =>
+    voice({ voice_id: `v-${name.toLowerCase()}`, label: name }),
+  );
+  vi.mocked(api.listAgentVoices).mockResolvedValue([...recommended, ...extra]);
+}
+
+describe("Agent / General — the voice", () => {
+  beforeEach(() => {
+    navigation.pathname = "/dashboard/agent";
+    navigation.search = "?section=general";
+    vi.mocked(api.updateAgentSettings).mockResolvedValue({
+      config_version: 3,
+      previous_version: 2,
+      generated_by: "llm",
+      synced: true,
+      detail: "Saved. Your receptionist uses it from the next call.",
+    });
+  });
+
+  it("shows the recommended voices and keeps the rest one click away", async () => {
+    givenVoices([voice({ voice_id: "v-brian", label: "Brian", recommended: false })]);
+    renderPage(<AgentGeneral />);
+
+    expect(await screen.findByText("Sarah")).toBeInTheDocument();
+    // Thirty voices is not a choice; the long tail waits until it is asked for.
+    expect(screen.queryByText("Brian")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /show 1 more/i }));
+
+    expect(screen.getByText("Brian")).toBeInTheDocument();
+  });
+
+  it("sends the chosen voice, and only when it changed", async () => {
+    givenVoices();
+    renderPage(<AgentGeneral />);
+
+    fireEvent.click(await screen.findByText("Mark"));
+    fireEvent.click(screen.getByRole("button", { name: /save changes/i }));
+
+    await waitFor(() => expect(api.updateAgentSettings).toHaveBeenCalled());
+    const sent = vi.mocked(api.updateAgentSettings).mock.calls[0]![1];
+    expect(sent.voice_id).toBe("v-mark");
+  });
+
+  it("warns that a new voice republishes the receptionist", async () => {
+    givenVoices();
+    renderPage(<AgentGeneral />);
+
+    expect(screen.queryByText(/publishes a new version/i)).not.toBeInTheDocument();
+    fireEvent.click(await screen.findByText("Eric"));
+
+    expect(screen.getByText(/publishes a new version/i)).toBeInTheDocument();
+  });
+
+  it("says when a voice has no sample rather than offering a dead button", async () => {
+    givenVoices([
+      voice({ voice_id: "v-quiet", label: "Quiet", preview_url: null, recommended: false }),
+    ]);
+    renderPage(<AgentGeneral />);
+
+    fireEvent.click(await screen.findByRole("button", { name: /show 1 more/i }));
+
+    expect(screen.getByText(/no sample for this one/i)).toBeInTheDocument();
+    // One "Hear it" per voice that actually has one.
+    expect(screen.getAllByRole("button", { name: /hear it/i })).toHaveLength(6);
+  });
+
+  it("sends the talking speed, and marks the one the vendor did not alter", async () => {
+    givenVoices();
+    renderPage(<AgentGeneral />);
+
+    // The note belongs to the option, not to the selection: it says which speed
+    // is the untouched recording, whether or not it is the one chosen.
+    expect(await screen.findByText(/most lifelike/i)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("radio", { name: "0.85" }));
+    fireEvent.click(screen.getByRole("button", { name: /save changes/i }));
+
+    await waitFor(() => expect(api.updateAgentSettings).toHaveBeenCalled());
+    expect(vi.mocked(api.updateAgentSettings).mock.calls[0]![1].speaking_speed).toBe(0.85);
+  });
+
+  it("plays a sample at the speed that is selected", async () => {
+    // The speed control sits under the grid; a sample that ignored it would be
+    // demonstrating a setting nobody chose.
+    givenVoices();
+    const play = vi
+      .spyOn(window.HTMLMediaElement.prototype, "play")
+      .mockResolvedValue(undefined);
+    renderPage(<AgentGeneral />);
+
+    fireEvent.click(await screen.findByRole("radio", { name: "1.2" }));
+    const buttons = await screen.findAllByRole("button", { name: /hear it/i });
+    fireEvent.click(buttons[0]!);
+
+    expect(play).toHaveBeenCalled();
+    const element = play.mock.instances[0] as HTMLAudioElement;
+    expect(element.playbackRate).toBe(1.2);
+    // Pitch left alone: the vendor's speed changes the speaking rate, it does
+    // not resample, and a squeaky sample would be a different setting.
+    expect(element.preservesPitch).toBe(true);
+    play.mockRestore();
+  });
+
+  it("offers three responsiveness settings, because the vendor has three", async () => {
+    // The reference design has four. ElevenLabs accepts patient, normal or
+    // eager and nothing else, so a "Medium" beside "Auto" would be two names
+    // for one behaviour.
+    givenVoices();
+    renderPage(<AgentGeneral />);
+
+    expect(await screen.findByRole("radio", { name: "Auto" })).toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: "Low" })).toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: "High" })).toBeInTheDocument();
+    expect(screen.queryByRole("radio", { name: "Medium" })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("radio", { name: "Low" }));
+    fireEvent.click(screen.getByRole("button", { name: /save changes/i }));
+
+    await waitFor(() => expect(api.updateAgentSettings).toHaveBeenCalled());
+    expect(vi.mocked(api.updateAgentSettings).mock.calls[0]![1].responsiveness).toBe("low");
+  });
+
+  it("does not treat the vendor's defaults as an edit", async () => {
+    // The form shows 1 and Auto for a receptionist that chose neither, and
+    // opening a page must not look like changing it.
+    givenVoices();
+    renderPage(<AgentGeneral />);
+
+    // The note is part of the option's accessible name on purpose: "most
+    // lifelike" is information, not decoration.
+    expect(await screen.findByRole("radio", { name: "1 Most lifelike" })).toBeChecked();
+    expect(screen.getByRole("radio", { name: "Auto" })).toBeChecked();
+    expect(screen.getByRole("button", { name: /save changes/i })).toBeDisabled();
+  });
+
+  it("shows a member the voices but cannot change them", async () => {
+    givenVoices();
+    renderPage(<AgentGeneral />, MEMBER);
+
+    expect(await screen.findByText("Sarah")).toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: /Sarah/ })).toHaveAttribute("aria-disabled", "true");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Receptionists — the gallery
+// ---------------------------------------------------------------------------
+
+function receptionist(overrides: Partial<ReceptionistCardView> = {}): ReceptionistCardView {
+  return {
+    tenant_id: "t1",
+    name: "Careful Legal",
+    status: "active",
+    role: "owner",
+    agent_name: null,
+    avatar: "ada",
+    voice: "Sarah",
+    phone_e164: "+18055550143",
+    live: true,
+    calls_recent: 12,
+    activity_days: 30,
+    created_at: "2026-10-01T00:00:00Z",
+    ...overrides,
+  };
+}
+
+describe("Receptionists — the gallery", () => {
+  beforeEach(() => {
+    navigation.pathname = "/dashboard/agents";
+  });
+
+  it("shows each receptionist with its number, voice and recent calls", async () => {
+    vi.mocked(api.listReceptionists).mockResolvedValue([receptionist()]);
+    renderPage(<ReceptionistsView />);
+
+    expect(await screen.findByRole("heading", { name: "Careful Legal" })).toBeInTheDocument();
+    expect(screen.getByText("Live")).toBeInTheDocument();
+    expect(screen.getByText(/\(805\) 555-0143/)).toBeInTheDocument();
+    expect(screen.getByText("Sarah")).toBeInTheDocument();
+    expect(screen.getByText(/calls in the last 30 days/)).toBeInTheDocument();
+  });
+
+  it("says a business is not answering even while it is active", async () => {
+    // Paid up and provisioned is not the same as something picking up, and the
+    // badge has to report what a caller would actually get.
+    vi.mocked(api.listReceptionists).mockResolvedValue([
+      receptionist({ live: false, phone_e164: null }),
+    ]);
+    renderPage(<ReceptionistsView />);
+
+    expect(await screen.findByText("Not answering")).toBeInTheDocument();
+    expect(screen.getByText("No number yet")).toBeInTheDocument();
+    // Nothing to call, so it offers the thing that would fix it instead.
+    expect(screen.queryByRole("link", { name: /call it/i })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /finish setup/i })).toBeInTheDocument();
+  });
+
+  it("keeps a deleted business visible but offers nothing that acts on it", async () => {
+    vi.mocked(api.listReceptionists).mockResolvedValue([receptionist({ status: "cancelled" })]);
+    renderPage(<ReceptionistsView />);
+
+    expect(await screen.findByText("Deleted")).toBeInTheDocument();
+    expect(screen.getByText(/calls are kept on the account/i)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^edit$/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /actions for/i })).not.toBeInTheDocument();
+  });
+
+  it("switches the workspace before opening one, not after", async () => {
+    // Navigating without switching would open this card's Agent page showing
+    // the previous business's receptionist.
+    vi.mocked(api.listReceptionists).mockResolvedValue([
+      receptionist({ tenant_id: "t2", name: "Sunset Salon" }),
+    ]);
+    renderPage(<ReceptionistsView />);
+
+    fireEvent.click(await screen.findByRole("button", { name: /^edit$/i }));
+
+    expect(navigation.push).toHaveBeenCalledWith("/dashboard/agent");
+    // Every page under here reads one tenant from the workspace, so the proof
+    // is that the workspace went and fetched the card's tenant.
+    await waitFor(() =>
+      expect(vi.mocked(api.getTenant).mock.calls.some((call) => call[0] === "t2")).toBe(true),
+    );
+  });
+
+  it("calls a failed setup what it is", async () => {
+    // `failed` is a real tenant state and used to fall through to "Setting up",
+    // which would have told an owner to wait for something that had stopped.
+    vi.mocked(api.listReceptionists).mockResolvedValue([
+      receptionist({ status: "failed", live: false, phone_e164: null }),
+    ]);
+    renderPage(<ReceptionistsView />);
+
+    expect(await screen.findByText("Setup failed")).toBeInTheDocument();
+  });
+
+  it("offers a way in when there is nothing yet", async () => {
+    vi.mocked(api.listReceptionists).mockResolvedValue([]);
+    renderPage(<ReceptionistsView />);
+
+    expect(await screen.findByText(/no receptionists yet/i)).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /set up a receptionist/i })).toBeInTheDocument();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Agent / Tags
+// ---------------------------------------------------------------------------
+
+function callTag(overrides: Partial<CallTagView> = {}): CallTagView {
+  return {
+    id: "tag-1",
+    name: "Pricing",
+    description: "Caller asks about pricing, invoices or refunds.",
+    color: "amber",
+    enabled: true,
+    position: 1,
+    created_at: "2026-10-20T00:00:00Z",
+    ...overrides,
+  };
+}
+
+function tagsView(tags: CallTagView[], max = 25): CallTagsView {
+  return { tags, max_tags: max, active: tags.filter((tag) => tag.enabled).length };
+}
+
+describe("Agent / Tags", () => {
+  beforeEach(() => {
+    navigation.pathname = "/dashboard/agent";
+    navigation.search = "?section=tags";
+  });
+
+  it("asks for a tag when there are none", async () => {
+    vi.mocked(api.listCallTags).mockResolvedValue(tagsView([]));
+    renderPage(<AgentTags />);
+
+    expect(await screen.findByText(/sort your calls by what they were about/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /add tag/i })).toBeEnabled();
+  });
+
+  it("sends the name, the rule and the colour", async () => {
+    vi.mocked(api.listCallTags).mockResolvedValue(tagsView([]));
+    vi.mocked(api.createCallTag).mockResolvedValue(tagsView([callTag()]));
+    renderPage(<AgentTags />);
+
+    fireEvent.click(await screen.findByRole("button", { name: /add tag/i }));
+    fireEvent.change(screen.getByLabelText("Tag name"), { target: { value: "Pricing" } });
+    fireEvent.change(screen.getByLabelText("Description"), {
+      target: { value: "Caller asks about pricing." },
+    });
+    fireEvent.change(screen.getByLabelText("Colour"), { target: { value: "amber" } });
+    fireEvent.click(screen.getByRole("button", { name: /save tag/i }));
+
+    await waitFor(() =>
+      expect(api.createCallTag).toHaveBeenCalledWith("t1", {
+        name: "Pricing",
+        description: "Caller asks about pricing.",
+        color: "amber",
+      }),
+    );
+  });
+
+  it("will not send a tag with no rule for applying it", async () => {
+    // An empty description is handed to the classifier with no rule, and every
+    // call becomes a candidate for the tag.
+    vi.mocked(api.listCallTags).mockResolvedValue(tagsView([]));
+    renderPage(<AgentTags />);
+
+    fireEvent.click(await screen.findByRole("button", { name: /add tag/i }));
+    fireEvent.change(screen.getByLabelText("Tag name"), { target: { value: "Pricing" } });
+    fireEvent.click(screen.getByRole("button", { name: /save tag/i }));
+
+    expect(await screen.findByText(/say when your receptionist should apply/i)).toBeInTheDocument();
+    expect(api.createCallTag).not.toHaveBeenCalled();
+  });
+
+  it("counts active tags against the limit and says what frees a slot", async () => {
+    const full = Array.from({ length: 25 }, (_, index) =>
+      callTag({ id: `tag-${index}`, name: `Tag ${index}` }),
+    );
+    vi.mocked(api.listCallTags).mockResolvedValue(tagsView(full));
+    renderPage(<AgentTags />);
+
+    expect(await screen.findByText(/25 of 25 active/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /add tag/i })).toBeDisabled();
+    // Switching one off is the way out, and it keeps the history.
+    expect(screen.getByText(/switch one off to free a slot/i)).toBeInTheDocument();
+  });
+
+  it("switches a tag off without deleting it", async () => {
+    vi.mocked(api.listCallTags).mockResolvedValue(tagsView([callTag()]));
+    vi.mocked(api.updateCallTag).mockResolvedValue(tagsView([callTag({ enabled: false })]));
+    renderPage(<AgentTags />);
+
+    fireEvent.click(await screen.findByRole("checkbox", { name: /switch off pricing/i }));
+
+    await waitFor(() =>
+      expect(api.updateCallTag).toHaveBeenCalledWith("t1", "tag-1", { enabled: false }),
+    );
+  });
+
+  it("warns that deleting a tag takes it off past calls", async () => {
+    // The difference between the two controls is the thing somebody discovers
+    // at the worst moment, so the confirmation says it.
+    vi.mocked(api.listCallTags).mockResolvedValue(tagsView([callTag()]));
+    vi.mocked(api.deleteCallTag).mockResolvedValue(tagsView([]));
+    renderPage(<AgentTags />);
+
+    fireEvent.click(await screen.findByRole("button", { name: /actions for pricing/i }));
+    fireEvent.click(screen.getByRole("menuitem", { name: /delete tag/i }));
+
+    expect(screen.getByText(/removes the tag from every call it was applied to/i)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /^delete tag$/i }));
+    await waitFor(() => expect(api.deleteCallTag).toHaveBeenCalledWith("t1", "tag-1"));
+  });
+
+  it("shows a member the tags but none of the controls", async () => {
+    vi.mocked(api.listCallTags).mockResolvedValue(tagsView([callTag()]));
+    renderPage(<AgentTags />, MEMBER);
+
+    expect(await screen.findByText("Pricing")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /add tag/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /actions for/i })).not.toBeInTheDocument();
+    expect(screen.getByRole("checkbox", { name: /switch off pricing/i })).toBeDisabled();
   });
 });

@@ -5,11 +5,11 @@ from __future__ import annotations
 import uuid
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import ForeignKey, String, Text
+from sqlalchemy import Float, ForeignKey, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
-from app.models.enums import GreetingStyle, enum_column
+from app.models.enums import GreetingStyle, Responsiveness, enum_column
 
 if TYPE_CHECKING:
     from app.models.tenant import Tenant
@@ -72,6 +72,23 @@ class BusinessProfile(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     #: promise than a first message it is given to read, and the UI says so
     #: rather than implying the two behave the same.
     goodbye_custom: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    #: How fast the receptionist talks, as a multiplier.
+    #:
+    #: The vendor's own field (``tts.speed``) and its own range: it refuses
+    #: anything outside 0.7 to 1.2, which was checked against the live API
+    #: rather than read off a doc. Null means "don't send one", which is the
+    #: vendor's 1.0 — and is what every receptionist had before this column.
+    speaking_speed: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    #: How quickly it decides the caller has stopped talking.
+    #:
+    #: Null is the same as ``AUTO``: the vendor's recommended setting. Stored as
+    #: our own three-value enum rather than the vendor's words, so the column
+    #: still means something if the vendor renames them.
+    responsiveness: Mapped[Responsiveness | None] = mapped_column(
+        enum_column(Responsiveness, "responsiveness"), nullable=True
+    )
 
     escalation_raw: Mapped[str | None] = mapped_column(Text, nullable=True)
     escalation_json: Mapped[dict[str, Any] | None] = mapped_column(nullable=True)

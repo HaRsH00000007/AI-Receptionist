@@ -12,6 +12,7 @@ notification failure from damaging provisioning.
 
 from __future__ import annotations
 
+import uuid
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -26,10 +27,12 @@ from app.providers.models import EmailMessage, EmailResult
 from app.services.email_templates import (
     TEMPLATE_ACTIVATION,
     TEMPLATE_CALL_SUMMARY,
+    TEMPLATE_IDS,
     render_template,
 )
 from app.services.notification_outbox import (
     NotificationOutbox,
+    account_key,
     call_summary_key,
     provisioning_key,
 )
@@ -446,3 +449,279 @@ def test_no_credential_reaches_an_email_body() -> None:
     for forbidden in ("api_key", "secret", "Bearer ", "sk-", "auth_token"):
         assert forbidden not in html
         assert forbidden not in text
+
+
+# ===========================================================================
+# Account-level notifications: the ones with no business attached
+# ===========================================================================
+
+
+async def test_a_notification_can_belong_to_no_tenant(db_session: AsyncSession) -> None:
+    """The constraint that silently broke every account email.
+
+    A sign-in link belongs to a person. The column was ``NOT NULL``, the route
+    had nothing truthful to put in it, and the insert failed after the response
+    had already told the customer an email was on its way.
+    """
+    queued = await _outbox().enqueue(
+        db_session,
+        tenant_id=None,
+        kind=NotificationKind.MAGIC_LINK,
+        recipient="nobody@example.com",
+        template_id="magic_link.v1",
+        template_vars={
+            "url": "http://localhost:3000/auth/callback?token=x",
+            "expires_in_minutes": 15,
+        },
+    )
+    await db_session.commit()
+
+    assert queued is not None
+    assert queued.tenant_id is None
+
+
+async def test_an_account_notification_delivers(db_session: AsyncSession) -> None:
+    """Queued without a tenant, and still rendered and sent like any other."""
+    queued = await _outbox().enqueue(
+        db_session,
+        tenant_id=None,
+        kind=NotificationKind.PASSWORD_RESET,
+        recipient="someone@example.com",
+        template_id="password_reset.v1",
+        template_vars={"url": "http://localhost:3000/auth/reset?token=x", "expires_in_minutes": 60},
+    )
+    await db_session.commit()
+    assert queued is not None
+
+    provider = FakeEmailProvider()
+    report = await _outbox().deliver(db_session, queued.id, provider)
+
+    assert report.outcome == "sent"
+    assert provider.outbox[0].subject == "Reset your password"
+
+
+async def test_an_account_key_is_derived_from_the_user(db_session: AsyncSession) -> None:
+    """One welcome per account, whatever retries the registration sees."""
+    import uuid
+
+    user_id = uuid.uuid4()
+    assert account_key(user_id, NotificationKind.WELCOME) == f"welcome:{user_id}"
+
+
+# ===========================================================================
+# A row the database will not accept must not be reported as queued
+# ===========================================================================
+
+
+async def test_an_integrity_error_without_a_dedupe_key_is_raised(
+    db_session: AsyncSession,
+) -> None:
+    """The swallow is for dedupe collisions only.
+
+    With no dedupe key there is no unique index to collide with, so an
+    IntegrityError means a column refused what we put in it. Returning ``None``
+    there is how an undeliverable email became an INFO log and a cheerful 202 —
+    so it is re-raised and the caller fails loudly.
+
+    Provoked with a tenant id that does not exist, which the foreign key
+    refuses.
+    """
+    from sqlalchemy.exc import IntegrityError
+
+    with pytest.raises(IntegrityError):
+        await _outbox().enqueue(
+            db_session,
+            tenant_id=uuid.uuid4(),
+            kind=NotificationKind.CALL_SUMMARY,
+            recipient="someone@example.com",
+            template_id=TEMPLATE_CALL_SUMMARY,
+            template_vars={
+                "business_name": "Nowhere",
+                "caller_number": None,
+                "summary": SUMMARY,
+                "status_url": "http://localhost:3000/status/x",
+            },
+        )
+
+
+# ===========================================================================
+# Every template id that is staged can be rendered
+# ===========================================================================
+
+
+def test_every_staged_template_id_has_a_template() -> None:
+    """The guard for the bug that made this whole module worth re-reading.
+
+    ``magic_link.v1`` was staged by the auth route and had no case in
+    ``render_template``, so the row went straight to FAILED on its first
+    attempt. Nothing caught it, because the id is written in one module and
+    resolved in another.
+
+    This walks the source for every ``template_id=`` the application stages and
+    requires it to be renderable. A new email with a forgotten template fails
+    here, at authoring time, rather than in a customer's missing inbox.
+    """
+    import re
+    from pathlib import Path
+
+    from app.services import email_templates
+
+    app_root = Path(__file__).resolve().parent.parent / "app"
+    staged: set[str] = set()
+    unresolved: set[str] = set()
+
+    for path in app_root.rglob("*.py"):
+        source = path.read_text(encoding="utf-8")
+        # A literal id. Nothing should stage one this way, but the route that
+        # caused this bug did exactly that, so it is the case worth catching.
+        staged.update(re.findall(r"""template_id=["']([a-z_]+\.v\d+)["']""", source))
+        # The supported way: a TEMPLATE_* constant, resolved through the module
+        # so a constant that does not exist is caught here too.
+        for name in re.findall(r"template_id=(?:\w+\.)?(TEMPLATE_[A-Z_]+)", source):
+            value = getattr(email_templates, name, None)
+            if isinstance(value, str):
+                staged.add(value)
+            else:
+                unresolved.add(name)
+
+    assert not unresolved, f"staged via a constant that does not exist: {sorted(unresolved)}"
+    # Without this the assertion below passes on an empty set, which is how a
+    # guard like this quietly stops guarding anything.
+    assert len(staged) >= 6, f"found too few staged template ids ({sorted(staged)})"
+    assert staged <= TEMPLATE_IDS, f"staged with no template: {sorted(staged - TEMPLATE_IDS)}"
+
+
+@pytest.mark.parametrize(
+    ("template_id", "variables"),
+    [
+        ("magic_link.v1", {"url": "https://x/a?token=t", "expires_in_minutes": 15}),
+        (
+            "welcome.v1",
+            {
+                "full_name": "Priya Raman",
+                "dashboard_url": "https://x/dashboard",
+                "verify_url": "https://x/auth/verify?token=t",
+            },
+        ),
+        ("password_reset.v1", {"url": "https://x/auth/reset?token=t", "expires_in_minutes": 60}),
+        (
+            "email_verification.v1",
+            {"url": "https://x/auth/verify?token=t", "expires_in_minutes": 1440},
+        ),
+    ],
+)
+def test_each_account_template_renders(template_id: str, variables: dict[str, object]) -> None:
+    subject, html, text = render_template(template_id, variables)
+
+    assert subject and html and text
+    # The link is the whole point of all four.
+    assert "token=t" in html
+    assert "token=t" in text
+
+
+def test_a_welcome_email_survives_a_missing_name() -> None:
+    """``full_name`` is optional on a user, so the template cannot assume one."""
+    subject, html, _ = render_template(
+        "welcome.v1",
+        {
+            "full_name": None,
+            "dashboard_url": "https://x/dashboard",
+            "verify_url": "https://x/auth/verify?token=t",
+        },
+    )
+
+    assert subject
+    assert "Hi," in html
+
+
+def test_a_name_cannot_inject_html_into_a_welcome_email() -> None:
+    """The same escaping property the business-name templates have.
+
+    A full name is user input and it reaches an inbox.
+    """
+    _, html, _ = render_template(
+        "welcome.v1",
+        {
+            "full_name": "<script>alert(1)</script>",
+            "dashboard_url": "https://x/dashboard",
+            "verify_url": "https://x/auth/verify?token=t",
+        },
+    )
+
+    assert "<script>" not in html
+    assert "&lt;script&gt;" in html
+
+
+def test_an_expiry_window_reads_naturally() -> None:
+    """Minutes, an hour, or hours — never "60 minutes" or "1 hours"."""
+    from app.services.email_templates import _expiry
+
+    assert _expiry(15) == "15 minutes"
+    assert _expiry(60) == "1 hour"
+    assert _expiry(1_440) == "24 hours"
+
+
+# ===========================================================================
+# A provider that refuses permanently
+# ===========================================================================
+
+
+async def test_a_non_retryable_provider_refusal_fails_with_its_reason(
+    db_session: AsyncSession,
+) -> None:
+    """What a Resend 403 for an unverified sender actually does here.
+
+    This is the production failure: a real provider, a real key, and a ``from``
+    address on a domain that cannot be verified. It must leave a FAILED row
+    carrying the reason, so an operator sees an unmet obligation rather than
+    having to find one warning in a log.
+    """
+    tenant = await _tenant(db_session)
+    queued = await _queue_summary(db_session, tenant)
+    await db_session.commit()
+    assert queued is not None
+
+    provider = _BrokenEmailProvider(retryable=False)
+    report = await _outbox().deliver(db_session, queued.id, provider)
+
+    assert report.outcome == "failed"
+    assert report.status is NotificationStatus.FAILED
+    assert provider.attempts == 1, "a permanent refusal must not be retried"
+
+    row = await db_session.get(Notification, queued.id)
+    assert row is not None
+    assert row.last_error and "connection refused" in row.last_error
+    assert row.next_attempt_at is None
+
+
+async def test_a_failed_account_email_stays_visible(db_session: AsyncSession) -> None:
+    """An auth email gets the same operator visibility as a call summary.
+
+    Before this change it got none: the activation path sent inline and logged a
+    warning, and the magic link never produced a row at all.
+    """
+    queued = await _outbox().enqueue(
+        db_session,
+        tenant_id=None,
+        kind=NotificationKind.MAGIC_LINK,
+        recipient="someone@example.com",
+        template_id="magic_link.v1",
+        template_vars={"url": "https://x/a?token=t", "expires_in_minutes": 15},
+    )
+    await db_session.commit()
+    assert queued is not None
+
+    report = await _outbox().deliver(db_session, queued.id, _BrokenEmailProvider(retryable=False))
+    assert report.status is NotificationStatus.FAILED
+
+    attempts = (
+        (
+            await db_session.execute(
+                select(NotificationAttempt).where(NotificationAttempt.notification_id == queued.id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert len(list(attempts)) == 1
+    assert not attempts[0].succeeded

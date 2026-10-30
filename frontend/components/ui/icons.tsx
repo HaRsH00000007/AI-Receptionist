@@ -384,6 +384,11 @@ export const PlayIcon = (props: IconProps) => (
     <path d="M7 4.5v15a1 1 0 0 0 1.5.9l12-7.5a1 1 0 0 0 0-1.8l-12-7.5A1 1 0 0 0 7 4.5z" />
   </Svg>
 );
+export const StopIcon = (props: IconProps) => (
+  <Svg {...props}>
+    <rect x="6" y="6" width="12" height="12" rx="1.5" />
+  </Svg>
+);
 export const TagIcon = (props: IconProps) => (
   <Svg {...props}>
     <path d="M20.6 13.4 13.4 20.6a2 2 0 0 1-2.8 0L2 12V2h10l8.6 8.6a2 2 0 0 1 0 2.8z" />

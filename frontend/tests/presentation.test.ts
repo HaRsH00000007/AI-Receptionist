@@ -115,6 +115,9 @@ describe("the configuration preview", () => {
     greeting_style: "friendly",
     custom_greeting: null,
       custom_goodbye: null,
+      voice_id: null,
+    speaking_speed: null,
+    responsiveness: null,
     escalation_raw: "Tell me about emergencies",
     escalation: {
       default_mode: "take_message",

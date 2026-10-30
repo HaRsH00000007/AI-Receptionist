@@ -297,6 +297,19 @@ class UserStatus(StrEnum):
     DISABLED = "disabled"
 
 
+class AuthTokenPurpose(StrEnum):
+    """What a single-use credential in ``auth_tokens`` is for.
+
+    Kept apart from :class:`SessionStatus` and the ``sessions`` table on
+    purpose. A magic link *becomes* a session and so belongs there; these two
+    never do — a reset token that could be presented as a bearer token would be
+    a sign-in that skipped the password it was about to set.
+    """
+
+    PASSWORD_RESET = "password_reset"
+    EMAIL_VERIFICATION = "email_verification"
+
+
 class MembershipRole(StrEnum):
     """What a user may do inside one organization.
 
@@ -459,6 +472,9 @@ class AuditAction(StrEnum):
     CONTACT_BLOCKED = "contact_blocked"
     CONTACT_UNBLOCKED = "contact_unblocked"
     CONTACTS_IMPORTED = "contacts_imported"
+    TAG_CREATED = "tag_created"
+    TAG_UPDATED = "tag_updated"
+    TAG_DELETED = "tag_deleted"
     TRANSFER_RULE_CREATED = "transfer_rule_created"
     TRANSFER_RULE_UPDATED = "transfer_rule_updated"
     TRANSFER_RULE_DELETED = "transfer_rule_deleted"
@@ -488,6 +504,10 @@ class AuditAction(StrEnum):
     ACCOUNT_UPDATED = "account_updated"
     PASSWORD_CHANGED = "password_changed"
     ACCOUNT_REGISTERED = "account_registered"
+    PASSWORD_RESET_REQUESTED = "password_reset_requested"
+    PASSWORD_RESET_COMPLETED = "password_reset_completed"
+    EMAIL_VERIFICATION_REQUESTED = "email_verification_requested"
+    EMAIL_VERIFIED = "email_verified"
     BUSINESS_CREATED = "business_created"
     INTEGRATION_CONNECTED = "integration_connected"
     INTEGRATION_DISCONNECTED = "integration_disconnected"
@@ -510,6 +530,8 @@ class NotificationKind(StrEnum):
     BILLING = "billing"
     MAGIC_LINK = "magic_link"
     USAGE_WARNING = "usage_warning"
+    PASSWORD_RESET = "password_reset"
+    EMAIL_VERIFICATION = "email_verification"
 
 
 class NotificationStatus(StrEnum):
@@ -590,6 +612,51 @@ class ContactSource(StrEnum):
     MANUAL = "manual"
     CALL = "call"
     IMPORT = "import"
+
+
+class Responsiveness(StrEnum):
+    """How quickly the receptionist decides a caller has finished speaking.
+
+    Three values because the vendor has three. ElevenLabs' ``turn_eagerness``
+    accepts ``patient``, ``normal`` or ``eager`` and refuses anything else —
+    checked against the live API — so a fourth setting here would be two names
+    for one behaviour, and a customer choosing between them would be choosing
+    nothing.
+
+    ``AUTO`` is ``normal``: the vendor's own recommendation, and what every
+    receptionist got before this existed.
+    """
+
+    AUTO = "auto"
+    #: Waits longer before answering. For callers who pause mid-sentence.
+    LOW = "low"
+    #: Answers sooner, at the cost of interrupting a caller who paused.
+    HIGH = "high"
+
+    @property
+    def eagerness(self) -> str:
+        """The vendor's word for it."""
+        return {"auto": "normal", "low": "patient", "high": "eager"}[self.value]
+
+
+class TagColor(StrEnum):
+    """The swatch beside a tag's name.
+
+    A closed set rather than a free hex value, for the same reason every other
+    colour in this product is a token: a customer-chosen ``#00ff00`` is
+    unreadable on one of the two themes, and nobody picking a colour in a modal
+    is checking it against a dark background. Each maps to a palette variable
+    the client already has.
+    """
+
+    GREEN = "green"
+    AMBER = "amber"
+    RED = "red"
+    BLUE = "blue"
+    VIOLET = "violet"
+    TEAL = "teal"
+    INDIGO = "indigo"
+    SLATE = "slate"
 
 
 class TransferType(StrEnum):

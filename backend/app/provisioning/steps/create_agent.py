@@ -30,6 +30,7 @@ from app.core.logging import get_logger
 from app.models import Agent, AgentConfig
 from app.models.enums import AgentMode, AgentStatus
 from app.provisioning.context import StepContext, StepResult
+from app.services.config_publishing import delivery_of_config
 from app.services.idempotency import tenant_resource_name
 from app.services.shared_agents import effective_agent_mode, resolve_shared_agent
 from app.services.transfer_targets import targets_of_config
@@ -94,6 +95,7 @@ async def run(ctx: StepContext) -> StepResult:
             # left over from a dead attempt is reset to what we believe,
             # destinations included, rather than keeping whatever it held.
             transfers=targets_of_config(config.model_params_json),
+            delivery=delivery_of_config(config.model_params_json),
         )
         source = "vendor"
     else:
@@ -103,6 +105,7 @@ async def run(ctx: StepContext) -> StepResult:
             first_message=config.first_message,
             voice_id=config.voice_id or ctx.settings.elevenlabs_default_voice_id,
             transfers=targets_of_config(config.model_params_json),
+            delivery=delivery_of_config(config.model_params_json),
         )
         source = "created"
 

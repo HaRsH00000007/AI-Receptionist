@@ -54,6 +54,8 @@ EXPECTED_TABLES = {
     "usage_daily",
     # ---- M2: audit ----
     "audit_logs",
+    # ---- account emails: single-use password-reset and verification tokens ----
+    "auth_tokens",
     # ---- M2: operations ----
     "idempotency_keys",
     "notifications",
@@ -72,6 +74,9 @@ EXPECTED_TABLES = {
     "transfer_rules",
     # ---- greetings that replace the usual one on a schedule ----
     "greeting_rules",
+    # ---- labelling calls ----
+    "call_tags",
+    "call_tag_assignments",
 }
 
 

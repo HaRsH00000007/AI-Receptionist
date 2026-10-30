@@ -19,6 +19,7 @@ from app.models import (
     Agent,
     AgentConfig,
     BusinessProfile,
+    Notification,
     PhoneNumber,
     ProvisioningRun,
     ProvisioningStepRecord,
@@ -28,6 +29,8 @@ from app.models.enums import (
     STEP_SEQUENCE,
     AgentConfigSource,
     AgentStatus,
+    NotificationKind,
+    NotificationStatus,
     PhoneNumberStatus,
     ProvisioningStatus,
     ProvisioningStep,
@@ -38,6 +41,7 @@ from app.provisioning.engine import ProvisioningEngine, claim_runs
 from app.provisioning.retry import backoff_delay_s, should_retry
 from app.provisioning.steps.purchase_number import build_ladder
 from app.schemas.signup import SignupRequest
+from app.services.notification_outbox import provisioning_key
 from app.services.signup import SignupService
 from tests.worker_fixtures import WorkerEnv, build_fake_providers
 
@@ -171,6 +175,79 @@ async def test_activation_emails_the_owner_with_the_number(worker_env: WorkerEnv
     assert message is not None
     assert number.e164 in message.text
     assert "Sunset Salon" in message.subject
+
+
+async def test_the_activation_email_is_a_durable_obligation(
+    worker_env: WorkerEnv,
+) -> None:
+    """Queued through the outbox, not sent inline.
+
+    It used to be a direct provider call wrapped in ``except AppError``, so a
+    vendor refusal became one warning and nothing else: no row, no retry, and
+    nothing for an operator to look at — while the step's own docstring claimed
+    the admin panel could resend it. A tenant could go live and its owner never
+    learn the phone number.
+    """
+    tenant_id, _ = await create_signup(worker_env)
+    await worker_env.drain()
+
+    async with worker_env.session_factory() as session:
+        rows = (
+            (
+                await session.execute(
+                    select(Notification).where(
+                        Notification.tenant_id == tenant_id,
+                        Notification.kind == NotificationKind.PROVISIONING_COMPLETE,
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+    assert len(list(rows)) == 1
+    assert rows[0].status is NotificationStatus.SENT
+    # Derived from the tenant, so a re-run of the step cannot announce twice.
+    assert rows[0].dedupe_key == provisioning_key(tenant_id, NotificationKind.PROVISIONING_COMPLETE)
+
+
+async def test_an_email_outage_leaves_the_tenant_live_and_the_email_owed(
+    worker_env: WorkerEnv,
+) -> None:
+    """The property that made inline sending wrong.
+
+    The receptionist is already answering by the time this email is queued, so a
+    mail provider outage must not undo provisioning — but it must not lose the
+    message either. Both halves are asserted: the tenant is ACTIVE, and the
+    notification is still owed and still due.
+    """
+    worker_env.email.behaviour.fail(
+        "send",
+        VendorError("mail provider unavailable", vendor="fake-email", retryable=True),
+        times=50,
+    )
+
+    tenant_id, _ = await create_signup(worker_env)
+    await worker_env.drain()
+
+    async with worker_env.session_factory() as session:
+        tenant = await session.get(Tenant, tenant_id)
+        assert tenant is not None
+        assert tenant.status is TenantStatus.ACTIVE, "an email outage undid provisioning"
+
+        row = (
+            await session.execute(
+                select(Notification).where(
+                    Notification.tenant_id == tenant_id,
+                    Notification.kind == NotificationKind.PROVISIONING_COMPLETE,
+                )
+            )
+        ).scalar_one()
+
+    assert row.status is NotificationStatus.PENDING
+    assert row.attempt >= 1
+    assert row.last_error and "unavailable" in row.last_error
+    assert row.next_attempt_at is not None, "the retry has nothing to find it by"
 
 
 async def test_the_agent_gets_our_rendered_prompt(worker_env: WorkerEnv) -> None:

@@ -131,6 +131,45 @@ class PasswordChange(BaseModel):
     new_password: SecretStr = Field(min_length=8, max_length=128)
 
 
+class PasswordResetRequest(BaseModel):
+    """Ask for a reset link."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    email: EmailStr
+
+
+class PasswordResetResponse(BaseModel):
+    """Deliberately uninformative, exactly like :class:`MagicLinkResponse`.
+
+    No ``sent`` boolean and no error for an unknown address: a reset form that
+    answered differently for a registered address would be the same enumeration
+    oracle the login form is careful not to be.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    message: str = "If that address has an account, a reset link is on its way."
+
+
+class PasswordResetCompletion(BaseModel):
+    """Trade a reset link for a new password."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    token: str = Field(min_length=16, max_length=256)
+    #: The bounds that apply when a password is chosen (app.services.passwords).
+    new_password: SecretStr = Field(min_length=8, max_length=128)
+
+
+class EmailVerification(BaseModel):
+    """Confirm an address with the token from the email."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    token: str = Field(min_length=16, max_length=256)
+
+
 class AccountRegistration(BaseModel):
     """Create an account: the first step, before any business exists."""
 

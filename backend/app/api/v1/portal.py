@@ -45,12 +45,15 @@ from app.schemas.portal import (
     TranscriptTurnView,
 )
 from app.schemas.views import TimezoneOptionView
+from app.schemas.website import VoiceOptionView
 from app.services.agent_settings import AgentSettingsService
 from app.services.audit import Actor, AuditService
 from app.services.auth import Principal
+from app.services.call_tags import labels_for_calls
 from app.services.config_versions import ConfigVersionService
 from app.services.provisioning_retry import reset_run_for_retry, restart_workflow
 from app.services.receptionist_deletion import ReceptionistDeletionService
+from app.services.voice_catalogue import VoiceCatalogue
 
 logger = get_logger(__name__)
 
@@ -171,6 +174,7 @@ async def get_call(
         urgency=call.urgency,
         agent_config_version=call.agent_config_version,
         transcript=_transcript(call.transcript_json),
+        tags=(await labels_for_calls(session, [call.id])).get(call.id, []),
     )
 
 
@@ -261,6 +265,27 @@ async def list_timezones(principal: RequireMember) -> list[TimezoneOptionView]:
         TimezoneOptionView(timezone=option.timezone, label=option.label)
         for option in timezone_options()
     ]
+
+
+@router.get(
+    "/{tenant_id}/agent/voices",
+    response_model=list[VoiceOptionView],
+    summary="The voices this receptionist may speak with",
+)
+async def list_voices(
+    principal: RequireMember,
+    settings: SettingsDep,
+    providers: ProvidersDep,
+    cache: CacheDep,
+) -> list[VoiceOptionView]:
+    """The same catalogue the signup picker shows.
+
+    Served here as well so that "you can change this later", which setup
+    promises on the voice screen, is true: without it the choice would be
+    makeable exactly once, before the business existed.
+    """
+    del principal  # authorization only
+    return await VoiceCatalogue(settings, providers.elevenlabs, cache).options()
 
 
 @router.put(

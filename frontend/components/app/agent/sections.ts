@@ -109,8 +109,8 @@ export const AGENT_SECTIONS: readonly AgentSection[] = [
     id: "tags",
     icon: TagIcon,
     label: "Tags",
-    built: false,
-    summary: "Label calls and contacts so they can be grouped and filtered.",
+    built: true,
+    summary: "Label calls by what they were about, so they can be grouped and filtered.",
   },
   {
     id: "integrations",

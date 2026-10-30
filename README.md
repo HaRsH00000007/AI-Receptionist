@@ -151,7 +151,7 @@ job.
   </tr>
   <tr>
     <td width="50%"><img src="docs/images/website-questions.png" alt="Step 5: what the agent asks callers"><br><sub><b>Step 5 — Questions.</b> What the receptionist asks a caller. Name, email and phone are built in and can be switched off, not renamed.</sub></td>
-    <td width="50%"><img src="docs/images/website-voice.png" alt="Step 6: choose a voice"><br><sub><b>Step 6 — Voice.</b> Only the voices this deployment is actually configured for. English is the only language the call path supports, and it says so.</sub></td>
+    <td width="50%"><img src="docs/images/website-voice.png" alt="Step 6: choose a voice"><br><sub><b>Step 6 — Voice.</b> The voice vendor’s own catalogue, read live — its names, its one-line descriptions and its samples, so you hear a voice before you choose it. A handful up front, the rest one click away. English is the only language the call path supports, and it says so.</sub></td>
   </tr>
   <tr>
     <td width="50%"><img src="docs/images/website-greeting.png" alt="Step 7: how the agent introduces itself"><br><sub><b>Step 7 — Greeting.</b> Callers hear this word for word.</sub></td>
@@ -657,7 +657,7 @@ and health checks at `/healthz` (liveness) and `/readyz` (readiness).
 | `ORCHESTRATOR` | `temporal` | `temporal` or `state_machine`. |
 | `LLM_PROVIDER` | `fake` | `fake`, `anthropic`, `openai` or `groq`. `DRY_RUN` doesn't force this one, because a dry run against a real model is often the point. |
 | `TWILIO_PROVIDER` / `ELEVENLABS_PROVIDER` | `fake` | Switch one vendor at a time to its real adapter. |
-| `EMAIL_PROVIDER` / `EMAIL_FROM` | `fake` | `resend`, `sendgrid` or `smtp`. `EMAIL_FROM` must be on a **verified domain**. |
+| `EMAIL_PROVIDER` / `EMAIL_FROM` | `fake` | `resend`, `sendgrid` or `smtp`. With `resend` or `sendgrid`, `EMAIL_FROM` must be on a **domain you have verified by DNS** — a free-mail or placeholder address **fails at startup**, because those providers refuse every send from one. `smtp` points at the local Mailpit and accepts anything. |
 | `ELEVENLABS_WEBHOOK_SECRET` | empty | Without it, webhooks are recorded but flagged unverified, and refused in staging and production. |
 | `ADMIN_API_KEY` | empty | Protects the operator console. Open locally when unset, refused in staging and production. |
 | `PUBLIC_API_URL` | empty | Set it behind a tunnel or proxy. Twilio signs the public URL, so signature checks fail without it. |
@@ -752,12 +752,20 @@ genuinely exercised.
 
 ### Platform
 
-- **Email needs a verified sending domain.** Resend's shared test sender only
-  delivers to the Resend account owner. Until a domain is verified, activation
-  emails, call summaries and magic links reach nobody else. Password sign-in
-  works without email.
-- **No password reset yet.** It needs working email. For now, the magic link is
-  the way back into an account.
+- **Email needs a verified sending domain.** Resend and SendGrid both refuse
+  every send whose `from` domain they have not verified by DNS, so until a
+  domain is verified nothing reaches a customer. The app now refuses to start
+  in that state rather than failing one send at a time: a free-mail or
+  placeholder `EMAIL_FROM` with a real provider selected is a startup error.
+  Password sign-in works without email.
+- **Email verification is recorded but not enforced.** Registering sends a
+  welcome email carrying a confirmation link, and `POST /auth/verify-email`
+  records the result — but nothing is gated on it yet. Making it a requirement
+  is a deliberate product decision that has not been taken.
+- **Password reset has no UI yet.** The API is complete
+  (`POST /auth/password-reset`, `POST /auth/password-reset/complete`), and the
+  emailed link points at `/auth/reset`, which is not built. The magic link is
+  still the way back in from the browser until it is.
 - **A full live run isn't verified end to end.** Real number, real agent, real
   inbound call. The real adapters are tested against recorded request and
   response shapes, but vendor behaviour only shows up on a live account.
@@ -773,7 +781,8 @@ genuinely exercised.
 
 ## Roadmap
 
-1. Verify a sending domain, then add password reset and signup confirmation emails.
+1. Verify a sending domain, then build the `/auth/reset` and `/auth/verify` pages the
+   reset and confirmation emails link to.
 2. A complete live run against real Twilio and ElevenLabs, recorded as contract tests.
 3. Customer self-service: edit configuration, pause the receptionist, manage numbers and team.
 4. Decide what blocking a contact should actually do, and build it deliberately.

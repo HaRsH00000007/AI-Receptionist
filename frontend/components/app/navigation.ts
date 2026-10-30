@@ -23,6 +23,10 @@ export interface NavItem {
 export const PRIMARY_NAV: readonly NavItem[] = [
   { href: "/dashboard", label: "Home", icon: GridIcon, exact: true },
   { href: "/dashboard/calls", label: "Calls", icon: ListIcon },
+  // Plural, and a separate destination from "Agent" below: this one is the
+  // gallery across every business on the account, that one is the settings
+  // for whichever business the workspace is currently on.
+  { href: "/dashboard/agents", label: "Receptionists", shortLabel: "All", icon: UsersIcon },
   { href: "/dashboard/agent", label: "Agent", icon: HeadsetIcon },
   { href: "/dashboard/contacts", label: "Contacts", icon: UsersIcon },
   { href: "/dashboard/sms", label: "SMS Campaigns", shortLabel: "SMS", icon: SendIcon },

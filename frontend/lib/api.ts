@@ -21,6 +21,9 @@ import type {
   ApiErrorBody,
   BusinessProfileView,
   CallDetailView,
+  CallTagInput,
+  CallTagPatch,
+  CallTagsView,
   CallView,
   ConfigVersionView,
   ContactImportResult,
@@ -41,6 +44,7 @@ import type {
   OnboardingRequest,
   PhoneNumberView,
   ProvisioningView,
+  ReceptionistCardView,
   ReadinessView,
   ReceptionistDeletionResult,
   RetryResult,
@@ -260,13 +264,17 @@ export function getPhoneOrNull(
 export function listCalls(
   tenantId: string,
   statusToken?: string,
-  options: { limit?: number; caller?: string } = {},
+  options: { limit?: number; caller?: string; tag?: string } = {},
 ): Promise<CallView[]> {
   const params = new URLSearchParams();
   if (options.limit) params.set("limit", String(options.limit));
   // One caller's history, for a contact. The server filters, so the result is
   // their calls rather than whichever of them fell inside the latest 100.
   if (options.caller) params.set("caller", options.caller);
+  // Same reasoning for a tag, and the same reason it is not done in the
+  // browser: filtering a page of results client-side answers "which of the
+  // last hundred carry this tag", which is a different question.
+  if (options.tag) params.set("tag", options.tag);
   const query = params.size ? `?${params.toString()}` : "";
   return tenantRead<CallView[]>(`/api/v1/tenants/${tenantId}/calls${query}`, statusToken);
 }
@@ -433,10 +441,7 @@ export function updateTransferRule(
 }
 
 /** Returns the remaining rules, so the page can say whether it took effect. */
-export function deleteTransferRule(
-  tenantId: string,
-  ruleId: string,
-): Promise<TransferRuleResult> {
+export function deleteTransferRule(tenantId: string, ruleId: string): Promise<TransferRuleResult> {
   return portal<TransferRuleResult>(`${tenantId}/agent/transfer-rules/${ruleId}`, {
     method: "DELETE",
   });
@@ -470,13 +475,56 @@ export function updateGreetingRule(
 }
 
 /** Returns the remaining rules, so the page can say which greeting is live. */
-export function deleteGreetingRule(
-  tenantId: string,
-  ruleId: string,
-): Promise<GreetingRuleResult> {
+export function deleteGreetingRule(tenantId: string, ruleId: string): Promise<GreetingRuleResult> {
   return portal<GreetingRuleResult>(`${tenantId}/agent/greeting-rules/${ruleId}`, {
     method: "DELETE",
   });
+}
+
+/**
+ * The voices this receptionist may speak with.
+ *
+ * The same catalogue the signup picker shows, served per tenant so that "you
+ * can change this later" is true rather than aspirational.
+ */
+export function listAgentVoices(tenantId: string): Promise<VoiceOptionView[]> {
+  return portal<VoiceOptionView[]>(`${tenantId}/agent/voices`);
+}
+
+/**
+ * Every receptionist this account has, for the gallery.
+ *
+ * The one account-scoped read in the portal: it is filtered server-side by the
+ * membership table, not by anything the client passes.
+ */
+export function listReceptionists(): Promise<ReceptionistCardView[]> {
+  return request<ReceptionistCardView[]>("/api/v1/me/receptionists", withCredentials);
+}
+
+/**
+ * The labels this receptionist puts on calls.
+ *
+ * Every write answers with the whole list, because a delete also removes the
+ * tag from the calls it marked and the page has to show what is left.
+ */
+export function listCallTags(tenantId: string): Promise<CallTagsView> {
+  return portal<CallTagsView>(`${tenantId}/agent/tags`);
+}
+
+export function createCallTag(tenantId: string, input: CallTagInput): Promise<CallTagsView> {
+  return send<CallTagsView>(`${tenantId}/agent/tags`, "POST", input);
+}
+
+export function updateCallTag(
+  tenantId: string,
+  tagId: string,
+  patch: CallTagPatch,
+): Promise<CallTagsView> {
+  return send<CallTagsView>(`${tenantId}/agent/tags/${tagId}`, "PATCH", patch);
+}
+
+export function deleteCallTag(tenantId: string, tagId: string): Promise<CallTagsView> {
+  return portal<CallTagsView>(`${tenantId}/agent/tags/${tagId}`, { method: "DELETE" });
 }
 
 export function retryProvisioning(tenantId: string): Promise<RetryResult> {

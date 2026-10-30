@@ -17,12 +17,15 @@ from app.models.enums import (
     AgentStatus,
     CallStatus,
     GreetingStyle,
+    MembershipRole,
     PhoneNumberStatus,
     ProvisioningStatus,
+    Responsiveness,
     StepStatus,
     TenantStatus,
 )
 from app.schemas.business import BusinessHours, EscalationPolicy
+from app.schemas.tags import CallTagLabel
 
 
 class TenantView(BaseModel):
@@ -64,10 +67,54 @@ class BusinessProfileView(BaseModel):
     #: Followed as an instruction rather than spoken from a vendor field; see
     #: ``BusinessProfile.goodbye_custom``.
     custom_goodbye: str | None
+    #: The voice the owner chose, or ``None`` when the greeting style's default
+    #: is still in use. An id, not a name: the names live in the vendor's
+    #: catalogue, which the picker reads separately.
+    voice_id: str | None
+    #: How fast it talks, or ``None`` for the vendor's default of 1.0.
+    speaking_speed: float | None
+    #: How quickly it answers, or ``None`` for the recommended setting.
+    responsiveness: Responsiveness | None
     escalation_raw: str | None
     escalation: EscalationPolicy | None
     greeting: str | None
     config_version: int | None
+
+
+class ReceptionistCardView(BaseModel):
+    """One receptionist, as the gallery shows it.
+
+    Flat on purpose: the gallery is read across every business an account has,
+    and a card that needed a second request per business would make the first
+    screen an owner sees the slowest one.
+
+    ``live`` is whether a voice agent is actually answering, which is not the
+    same as the tenant being active — a business can be paid up and still mid
+    provisioning. The card says both.
+    """
+
+    tenant_id: uuid.UUID
+    name: str
+    #: The tenant's own state: ``active``, ``provisioning``, ``cancelled``...
+    status: TenantStatus
+    #: What this account may do with it. Deleting needs ``owner``.
+    role: MembershipRole
+    #: The owner's own name for the receptionist, when they gave one.
+    agent_name: str | None
+    #: Which drawn face represents it, derived from the voice it speaks with
+    #: (:mod:`app.services.avatars`). Empty when no voice was chosen, and the
+    #: client draws one from the tenant id instead.
+    avatar: str
+    #: The voice's name, when one was chosen and the catalogue could be read.
+    voice: str | None
+    phone_e164: str | None
+    #: Whether a voice agent is live and answering for this business.
+    live: bool
+    calls_recent: int
+    #: What window ``calls_recent`` covers, so the card can say "in 30 days"
+    #: rather than hard-coding a number the server decides.
+    activity_days: int
+    created_at: datetime
 
 
 class StepView(BaseModel):
@@ -173,6 +220,10 @@ class CallView(BaseModel):
     callback_number: str | None
     intent: str | None
     urgency: int | None
+    #: The labels the classifier put on this call. Distinct from ``intent``,
+    #: which is one free-text guess from the summary; these are the business's
+    #: own closed set.
+    tags: list[CallTagLabel] = []
 
 
 class RunSummaryView(BaseModel):

@@ -349,7 +349,7 @@ async def test_only_a_configured_voice_and_english_are_accepted(
     offered = await api_client.get(f"{SETUP}/voices", headers=headers)
     assert offered.status_code == 200
     voices = offered.json()
-    assert voices, "the configured voice map is the only source of options"
+    assert voices, "the vendor's catalogue, filtered to voices this call path can speak"
 
     bad_voice = await api_client.put(
         f"{SETUP}/choices", json={"voice_id": "not-a-real-voice"}, headers=headers

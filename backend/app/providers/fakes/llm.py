@@ -49,7 +49,11 @@ class FakeLLMProvider:
         if self.scripted:
             return LLMResponse(text=self.scripted.pop(0), model=model)
 
-        if "UNTRUSTED WEBSITE CONTENT" in system:
+        if '"tag_ids"' in system:
+            # The tag classifier. Checked before the transcript branch below,
+            # because that prompt mentions a transcript too.
+            text = self._tag_ids_json(user)
+        elif "UNTRUSTED WEBSITE CONTENT" in system:
             # The website-onboarding prompt. Answered here so the whole flow
             # works offline in DRY_RUN, and so the fake cannot be the reason a
             # test passes: everything it returns is derived from the pages it
@@ -62,6 +66,22 @@ class FakeLLMProvider:
         return LLMResponse(text=text, model=model, input_tokens=len(user) // 4, output_tokens=200)
 
     # ---- generated payloads ---------------------------------------------
+    def _tag_ids_json(self, user: str) -> str:
+        """The labels whose name is actually said in the transcript.
+
+        Derived from the input like everything else here: a fake that returned
+        a plausible-looking id would make the caller's "is this one of *my*
+        tags?" check untestable, which is the only thing standing between a
+        model's guess and a row in a multi-tenant table.
+
+        Tests that need a specific reply — malformed JSON, a stranger's id, a
+        hundred entries — script one instead.
+        """
+        labels = re.findall(r"^- (\S+): (.+?) — ", user, flags=re.MULTILINE)
+        transcript = user.split("Transcript:", 1)[-1].lower()
+        chosen = [tag_id for tag_id, name in labels if name.strip().lower() in transcript]
+        return json.dumps({"tag_ids": chosen})
+
     def _website_knowledge_json(self, user: str) -> str:
         """A knowledge draft built only from the words on the fake pages.
 

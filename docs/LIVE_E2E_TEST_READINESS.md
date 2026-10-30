@@ -104,8 +104,8 @@ Take the signing secret it returns and set `ELEVENLABS_WEBHOOK_SECRET`.
 | Variable | Why |
 |---|---|
 | `BILLING_GATE_ENABLED=false` | avoids needing a real Stripe subscription. Local/test only — production refuses to boot with it off |
-| `EMAIL_PROVIDER=smtp` (keep) | keeps summary emails in Mailpit instead of mailing a real person |
-| `ELEVENLABS_VOICE_MAP` | the defaults are real public ElevenLabs voice ids; fine as-is |
+| `EMAIL_PROVIDER=smtp` (keep) | keeps summary emails in Mailpit instead of mailing a real person. This only became true on 2026-10-29: there was no SMTP adapter before then, so the setting silently resolved to the fake and Mailpit stayed empty |
+| `ELEVENLABS_VOICE_MAP` | the defaults are real public ElevenLabs voice ids; fine as-is. It is now the *style defaults* and the fallback picker, not the whole list: the voice picker reads the account's catalogue from `GET /v1/voices` |
 
 ### The one thing that costs money even in DRY_RUN
 

@@ -171,6 +171,12 @@ database changes, so the rollback is a vendor-side configuration edit.
   That is also why a *cold* transfer is offered only on the `elevenlabs_native`
   path: a blind transfer needs the number to have been imported into ElevenLabs
   from Twilio natively, which the TwiML path does not do.
+* **There is no hold music during a transfer.** The reference design offers a
+  choice of it; our voice vendor has no audio setting of any kind on an agent —
+  checked against the live API, which returns `tts`, `turn`, `asr`, `vad` and
+  `conversation` and nothing resembling hold audio. The handover also happens
+  inside the vendor's own call leg, so Twilio's `waitUrl` is not ours to set
+  either. The control is deliberately absent rather than present and inert.
 * **A scheduled greeting is switched by the worker, not by the call.** On the
   `elevenlabs_native` path the vendor owns the number and answers from the
   agent's own `first_message`, so there is no request of ours in the middle to

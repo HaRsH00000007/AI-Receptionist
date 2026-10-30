@@ -165,6 +165,7 @@ describe("StatusView", () => {
         callback_number: "+18055557788",
         intent: "booking_request",
         urgency: 2,
+        tags: [],
       },
     ]);
     render(<StatusView tenantId="t-1" />);

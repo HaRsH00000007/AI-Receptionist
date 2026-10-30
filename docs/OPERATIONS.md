@@ -115,6 +115,47 @@ polling engine remains behind `ORCHESTRATOR=state_machine` as a documented
 fallback — but never run both at once, because two orchestrators over the same
 runs could both buy a number.
 
+**During an email outage:** nothing is lost and nothing is undone. Every
+message is a row in `notifications` before any send is attempted, retried on a
+60s/5m/30m/2h backoff, and left `FAILED` with its reason in `last_error` once
+the attempts run out. A tenant whose provisioning finished stays `ACTIVE` — the
+receptionist is already answering — and the email stays owed.
+
+---
+
+## 4a. Nobody is receiving email
+
+Every outbound message is in `notifications`, so this is one query rather than a
+log hunt:
+
+```sql
+SELECT kind, status, recipient, attempt, last_error, created_at
+FROM notifications
+WHERE status <> 'sent'
+ORDER BY created_at DESC
+LIMIT 50;
+```
+
+Read it as follows.
+
+- **`FAILED` with a provider error on every row, all kinds.** The sender is
+  refused. Resend and SendGrid reject any `from` domain they have not verified
+  by DNS. `Settings` now refuses to boot in that state, so this should only be
+  reachable if the domain's verification lapsed *after* a deploy.
+- **`FAILED` with `unknown notification template: ...`.** Code staged a
+  template id that does not exist. Non-retryable by design — it will never
+  start working — and `tests/test_notification_outbox.py` has a guard that is
+  supposed to catch this before release.
+- **`PENDING` with `attempt = 0` and a growing backlog.** The worker is not
+  claiming. Check that `ai-receptionist-worker` is running.
+- **No rows at all for a flow somebody reported.** The staging call is not
+  happening. This was the magic-link bug: the route answered 202 and wrote
+  nothing.
+
+Account emails — sign-in links, welcome, password resets, verification — carry
+`tenant_id IS NULL`. They belong to a person, not a business, so a per-tenant
+query will not show them.
+
 ---
 
 ## 5. A bad prompt is live
@@ -172,6 +213,14 @@ on someone remembering to deploy a scheduler:
 
 Both are logged and audited. Both swallow their own failures, because a
 retention problem must not stop the worker summarizing calls and sending mail.
+
+**Call tagging** rides on the existing post-call job rather than a loop of its
+own: after the summary is cached, the call is classified against the business's
+enabled tags and the assignments are written. It is skipped entirely for a
+tenant with no tags, so no extra model call is made for anybody who does not use
+it, and a marker in ``calls.transcript_json`` stops a retried job paying for a
+second classification. A classifier failure is logged as `could not tag a call`
+and nothing else: the summary and the notification are already safe.
 
 One more runs on **every tick**, not on that cadence:
 

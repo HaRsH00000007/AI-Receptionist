@@ -69,6 +69,7 @@ const CALL: CallView = {
   callback_number: "+15559998888",
   intent: "booking_request",
   urgency: 2,
+  tags: [],
 };
 
 function givenHealthyTenant(usage: Record<string, unknown> = {}, calls: CallView[] = [CALL]) {
@@ -135,6 +136,9 @@ function givenHealthyTenant(usage: Record<string, unknown> = {}, calls: CallView
     greeting_style: "friendly",
     custom_greeting: null,
       custom_goodbye: null,
+      voice_id: null,
+    speaking_speed: null,
+    responsiveness: null,
     escalation_raw: null,
     escalation: null,
     greeting: "Hi, thanks for calling Sunset Salon!",

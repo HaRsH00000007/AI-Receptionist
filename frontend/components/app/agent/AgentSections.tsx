@@ -17,6 +17,7 @@ import { useSearchParams } from "next/navigation";
 
 import { AgentGeneral } from "@/components/app/agent/AgentGeneral";
 import { AgentGreetings } from "@/components/app/agent/AgentGreetings";
+import { AgentTags } from "@/components/app/agent/AgentTags";
 import { AgentTransfers } from "@/components/app/agent/AgentTransfers";
 import { AGENT_SECTIONS, sectionFor, type AgentSection } from "@/components/app/agent/sections";
 import { useTenantData } from "@/components/app/TenantWorkspace";
@@ -74,6 +75,7 @@ function Panel({ section }: { section: AgentSection }) {
     );
   }
   if (section.id === "transfer") return <AgentTransfers />;
+  if (section.id === "tags") return <AgentTags />;
   // Training is the existing agent page: what the receptionist knows, the
   // conversation preview, version history and the danger zone. Reused whole
   // rather than reimplemented beside it.

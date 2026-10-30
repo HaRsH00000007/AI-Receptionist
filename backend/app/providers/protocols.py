@@ -21,6 +21,7 @@ from app.providers.models import (
     BillingPortalSession,
     CheckoutSession,
     CustomerRef,
+    Delivery,
     EmailMessage,
     EmailResult,
     LLMResponse,
@@ -29,6 +30,7 @@ from app.providers.models import (
     PurchasedNumber,
     SubscriptionRef,
     TransferTarget,
+    VoiceRef,
 )
 
 
@@ -96,9 +98,19 @@ class ElevenLabsProvider(Protocol):
         first_message: str,
         voice_id: str,
         transfers: Sequence[TransferTarget] = (),
+        delivery: Delivery | None = None,
     ) -> AgentRef: ...
 
     async def get_agent(self, *, agent_id: str) -> AgentRef | None: ...
+
+    async def list_voices(self) -> Sequence[VoiceRef]:
+        """Every voice this account may speak with.
+
+        Read rather than configured, because the catalogue is the vendor's and
+        changes without us: a hard-coded list goes stale, and offering a voice
+        the account has lost is a 422 on publish rather than a missing option.
+        """
+        ...
 
     async def find_agent_by_name(self, *, name: str) -> AgentRef | None:
         """Adoption guard, for the same reason as the Twilio one."""
@@ -113,6 +125,7 @@ class ElevenLabsProvider(Protocol):
         first_message: str,
         voice_id: str,
         transfers: Sequence[TransferTarget] = (),
+        delivery: Delivery | None = None,
     ) -> AgentRef:
         """Push our config onto an existing agent. Backs ``resync_agent``.
 

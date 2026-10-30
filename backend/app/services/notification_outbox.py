@@ -63,6 +63,19 @@ def provisioning_key(tenant_id: uuid.UUID, kind: NotificationKind) -> str:
     return f"{kind.value}:{tenant_id}"
 
 
+def account_key(user_id: uuid.UUID, kind: NotificationKind) -> str:
+    """One per account, for the messages that are only ever sent once.
+
+    Used for the welcome email. Deliberately *not* used for a sign-in link, a
+    password reset or a resent verification: each of those is a fresh request
+    from the person, carries a different token, and must send again — a dedupe
+    key there would silently drop the second attempt, which is precisely the
+    moment someone is sitting there waiting for it because the first never
+    arrived.
+    """
+    return f"{kind.value}:{user_id}"
+
+
 @dataclass(frozen=True, slots=True)
 class DeliveryReport:
     notification_id: uuid.UUID
@@ -81,7 +94,7 @@ class NotificationOutbox:
         self,
         session: AsyncSession,
         *,
-        tenant_id: uuid.UUID,
+        tenant_id: uuid.UUID | None,
         kind: NotificationKind,
         recipient: str,
         template_id: str,
@@ -93,7 +106,13 @@ class NotificationOutbox:
 
         Returns ``None`` when an identical obligation already exists — decided
         by the unique index rather than a prior SELECT, because a check followed
-        by an insert loses to a concurrent delivery of the same webhook.
+        by an insert loses to a concurrent delivery of the same webhook. With no
+        ``dedupe_key`` there is no such index to collide with, so ``None`` is
+        impossible and the caller need not handle it.
+
+        ``tenant_id`` is optional because not every message is about a business:
+        a sign-in link, a password reset and a welcome email belong to an
+        account, which may belong to no tenant at all.
 
         Only the template id and its variables are stored, never the rendered
         body. Keeping the rendered text would put a call summary — the
@@ -119,9 +138,19 @@ class NotificationOutbox:
             # The savepoint confines this to the insert. A plain flush would
             # poison the caller's transaction, so a duplicate notification would
             # roll back the provisioning step that requested it.
+            #
+            # Only a *dedupe collision* is swallowed. Without a dedupe key there
+            # is no unique index on this row, so an IntegrityError means
+            # something else is wrong — a column that will not accept what we
+            # put in it — and swallowing that is how an undeliverable email
+            # becomes an INFO log and a cheerful response. It is re-raised so
+            # the caller fails loudly instead of promising a message it never
+            # recorded.
+            if dedupe_key is None:
+                raise
             logger.info(
                 "notification already queued; not queued twice",
-                extra={"tenant_id": str(tenant_id), "kind": kind.value},
+                extra={"tenant_id": str(tenant_id) if tenant_id else None, "kind": kind.value},
             )
             return None
         return notification

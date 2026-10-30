@@ -24,7 +24,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
-from app.core.errors import ConflictError, NotFoundError
+from app.core.errors import ConflictError, InvalidInputError, NotFoundError
 from app.core.logging import get_logger
 from app.models import Agent, AgentConfig, BusinessProfile, Tenant
 from app.models.enums import ActorType, AgentStatus, AuditAction, TenantStatus
@@ -35,6 +35,7 @@ from app.services.audit import Actor, AuditService
 from app.services.config_publishing import generate_and_publish, push_config_to_agent
 from app.services.config_versions import ConfigVersionService
 from app.services.normalization import parse_opening_hours
+from app.services.voice_catalogue import VoiceCatalogue
 
 logger = get_logger(__name__)
 
@@ -68,6 +69,17 @@ class AgentSettingsService:
         ).scalar_one_or_none()
         if profile is None:
             raise NotFoundError("tenant has no business profile")
+
+        if update.voice_id is not None:
+            # Checked against the catalogue before anything is written. A voice
+            # the account does not have would be a 422 from the vendor on every
+            # push from here on, so it is refused at the one moment a customer
+            # can still be told which field is wrong.
+            allowed = await VoiceCatalogue(self.settings, self.providers.elevenlabs).voice_ids()
+            if update.voice_id and update.voice_id not in allowed:
+                raise InvalidInputError(
+                    "That voice isn't available.", details={"field": "voice_id"}
+                )
 
         changed = self._apply(profile, tenant, update)
 
@@ -197,6 +209,25 @@ class AgentSettingsService:
         if update.greeting_style is not profile.greeting_style:
             profile.greeting_style = update.greeting_style
             changed.append("greeting_style")
+
+        if update.voice_id is not None:
+            voice = update.voice_id or None
+            if voice != profile.voice_id:
+                profile.voice_id = voice
+                changed.append("voice_id")
+
+        # How it sounds, not what it says — but still a change a caller hears,
+        # so both of these publish a version rather than being label-only.
+        if update.speaking_speed is not None and update.speaking_speed != profile.speaking_speed:
+            profile.speaking_speed = update.speaking_speed
+            changed.append("speaking_speed")
+
+        if (
+            update.responsiveness is not None
+            and update.responsiveness is not profile.responsiveness
+        ):
+            profile.responsiveness = update.responsiveness
+            changed.append("responsiveness")
 
         greeting = update.custom_greeting or None
         if greeting != profile.greeting_custom:

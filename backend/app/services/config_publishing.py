@@ -27,6 +27,7 @@ from app.models import Agent, AgentConfig, BusinessProfile, Tenant
 from app.models.greeting_rule import GreetingRule
 from app.models.identity import User
 from app.models.transfer_rule import TransferRule
+from app.providers.models import Delivery
 from app.providers.protocols import ElevenLabsProvider, LLMProvider
 from app.services.config_generator import (
     ConfigGenerator,
@@ -55,6 +56,34 @@ from app.services.transfer_targets import (
 )
 
 logger = get_logger(__name__)
+
+#: Where the delivery settings live inside ``model_params_json``.
+DELIVERY_KEY = "delivery"
+
+
+def delivery_of_config(model_params: dict[str, object] | None) -> Delivery:
+    """The speed and eagerness a published configuration carries.
+
+    Read defensively: this parses a JSONB column that may have been written by
+    an older release, and a bad value should cost the vendor's default rather
+    than the push. The vendor's own range is 0.7 to 1.2, so anything outside it
+    is dropped — it would be a 422 on every push from then on.
+    """
+    raw = (model_params or {}).get(DELIVERY_KEY)
+    if not isinstance(raw, dict):
+        return Delivery()
+    speed: float | None = None
+    try:
+        value = raw.get("speed")
+        if value is not None and 0.7 <= float(value) <= 1.2:
+            speed = float(value)
+    except (TypeError, ValueError):
+        logger.warning("ignoring an unreadable speaking speed on a published config")
+    eagerness = raw.get("eagerness")
+    return Delivery(
+        speed=speed,
+        eagerness=eagerness if eagerness in {"patient", "normal", "eager"} else None,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,13 +117,21 @@ async def generate_and_publish(
         collect=enabled_question_labels(profile.caller_questions_json),
         closing=profile.goodbye_custom or "",
     )
-    # An explicit choice wins over the greeting-style default. Validated where
-    # it is saved, and re-checked here: a voice id that is no longer in the
-    # configured map would be a 422 from the vendor on every publish, so an
-    # unknown one falls back rather than breaking the agent.
-    voice_id = select_voice_id(settings, profile.greeting_style)
-    if profile.voice_id and profile.voice_id in settings.voice_map.values():
-        voice_id = profile.voice_id
+    # An explicit choice wins over the greeting-style default.
+    #
+    # Taken as stored, and deliberately *not* re-checked against
+    # ``ELEVENLABS_VOICE_MAP``: that map holds three style defaults, while the
+    # picker offers the account's whole catalogue
+    # (:mod:`app.services.voice_catalogue`). Re-checking against it would have
+    # accepted a customer's choice of "Eric" on the way in and then silently
+    # reset them to the style voice on their next unrelated edit, which is a
+    # worse failure than the one the check was written to prevent.
+    #
+    # The gate is at write time, where the catalogue is actually readable. If a
+    # voice is later withdrawn from the account the vendor refuses the push and
+    # the save reports it, rather than the receptionist changing voice without
+    # anybody being told.
+    voice_id = profile.voice_id or select_voice_id(settings, profile.greeting_style)
 
     # Carried, not re-derived from anything the generator said: the transfer
     # destinations are the business's own rows, and a version that forgot them
@@ -135,6 +172,13 @@ async def generate_and_publish(
         model_params={
             PARAMS_KEY: dump_targets(targets_for(rules)),
             GREETING_KEY: dump_schedule(schedule_for(greetings)),
+            # On the version, like the transfers and the greeting schedule, so
+            # that rolling back to a version restores how it *sounded* and not
+            # only what it said.
+            DELIVERY_KEY: {
+                "speed": profile.speaking_speed,
+                "eagerness": (profile.responsiveness.eagerness if profile.responsiveness else None),
+            },
             "generated": outcome.config.model_dump(mode="json"),
             # Recorded so a config can be reproduced: which model produced it,
             # at what sampling temperature, against which prompt template.
@@ -196,6 +240,7 @@ async def push_config_to_agent(
         system_prompt=config.system_prompt,
         first_message=greeting,
         voice_id=config.voice_id or settings.elevenlabs_default_voice_id,
+        delivery=delivery_of_config(config.model_params_json),
         # From the version being pushed, not from the rules table: pushing a
         # version means making the vendor match *that* version, so a rollback
         # restores the destinations that version was published with rather than

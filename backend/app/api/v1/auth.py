@@ -1,12 +1,18 @@
 """Authentication endpoints.
 
-Five routes, two ways in, one credential lifecycle:
+Two ways in, one credential lifecycle:
 
-    POST   /auth/magic-link       ask for a login link
-    POST   /auth/session          trade the link for a session
-    POST   /auth/password-session sign in with a password
-    GET    /auth/me               who am I
-    DELETE /auth/session          log out
+    POST   /auth/register                 create an account, get a session
+    POST   /auth/magic-link               ask for a login link
+    POST   /auth/session                  trade the link for a session
+    POST   /auth/password-session         sign in with a password
+    POST   /auth/password                 set or change your password
+    POST   /auth/password-reset           ask for a reset link
+    POST   /auth/password-reset/complete  trade the link for a new password
+    POST   /auth/verify-email             confirm an address
+    POST   /auth/verify-email/resend      send that confirmation again
+    GET    /auth/me                       who am I
+    DELETE /auth/session                  log out
 
 The two sign-in routes are separate endpoints rather than one that branches on
 which field arrived. A single endpoint accepting either would have to decide
@@ -20,9 +26,16 @@ addresses, or an error that names the reason would each turn the login form into
 a free oracle for "is this business a customer of yours?" — which is worth money
 to a competitor and is the first step of a targeted phish.
 
-Delivery of the email is intentionally not done here. The endpoint stages a
-notification row and returns; a provider outage must not make login *appear* to
+Delivery of the email is intentionally not done here. These endpoints stage a
+notification row and return; a provider outage must not make login *appear* to
 fail when the link was in fact issued.
+
+What that trade-off does **not** permit is reporting success for a message that
+was never recorded. Staging goes through
+:mod:`app.services.account_notifications`, which flushes the row inside the
+request, so a row that cannot be written raises here rather than failing in the
+unit-of-work commit after the response has already promised an email. That is
+the exact shape of the bug these routes used to have.
 """
 
 from __future__ import annotations
@@ -40,20 +53,29 @@ from app.api.deps import SettingsDep
 from app.core.errors import AuthenticationError, AuthorizationError, InvalidInputError
 from app.core.logging import get_logger
 from app.db.session import SessionDep
-from app.models.enums import ActorType, AuditAction, NotificationKind
+from app.models.enums import ActorType, AuditAction
 from app.models.identity import Membership, User
-from app.models.operations import Notification
 from app.models.tenant import Tenant
 from app.schemas.auth import (
     AccountRegistration,
     AccountUpdate,
+    EmailVerification,
     MagicLinkExchange,
     MagicLinkRequest,
     MagicLinkResponse,
     PasswordChange,
+    PasswordResetCompletion,
+    PasswordResetRequest,
+    PasswordResetResponse,
     PasswordSignIn,
     SessionView,
     TenantMembershipView,
+)
+from app.services.account_notifications import (
+    stage_email_verification,
+    stage_magic_link,
+    stage_password_reset,
+    stage_welcome,
 )
 from app.services.audit import AuditService
 from app.services.auth import AuthService, IssuedToken, Principal
@@ -180,18 +202,17 @@ async def request_magic_link(
         # Staged as a notification rather than sent inline: an email provider
         # outage must not make a successfully-issued link look like a failure,
         # and the retry needs a durable row to find.
-        session.add(
-            Notification(
-                tenant_id=issued.session.active_tenant_id,
-                kind=NotificationKind.MAGIC_LINK,
-                recipient=payload.email.strip().lower(),
-                subject="Your sign-in link",
-                template_id="magic_link.v1",
-                template_vars_json={
-                    "url": f"{settings.public_app_url}/auth/callback?token={issued.token}",
-                    "expires_in_minutes": settings.magic_link_ttl_s // 60,
-                },
-            )
+        #
+        # The row carries no tenant. A sign-in link belongs to an account, and
+        # an account may belong to no business or to several — the previous
+        # version put the session's active tenant here, which is always None for
+        # a link that has not been exchanged yet, and the NOT NULL column
+        # rejected every insert *after* this route had returned 202.
+        await stage_magic_link(
+            session,
+            settings,
+            recipient=payload.email.strip().lower(),
+            token=issued.token,
         )
 
     # Logged without the outcome. Recording "issued: false" at INFO would
@@ -377,11 +398,175 @@ async def register(
     limit is what keeps that slow.
     """
     await request.app.state.signup_rate_limiter.check(client_ip(request) or "unknown")
-    issued = await AuthService(session, settings).register(
+    service = AuthService(session, settings)
+    issued = await service.register(
         full_name=payload.full_name,
         email=str(payload.email),
         password=payload.password.get_secret_value(),
         ip_address=client_ip(request),
         user_agent=request.headers.get("user-agent"),
     )
+
+    # The welcome email, carrying the verification link. Queued inside the
+    # transaction that created the account, so there is no window in which a
+    # user exists with no record that we owe them a welcome. Deduped on the
+    # account, so a retried registration cannot produce two.
+    user = await session.get(User, issued.session.user_id)
+    if user is not None:  # pragma: no branch - register just created this row
+        verification = await service.issue_email_verification(
+            user,
+            ip_address=client_ip(request),
+            user_agent=request.headers.get("user-agent"),
+        )
+        await stage_welcome(session, settings, user=user, verification_token=verification.token)
+
     return await _signed_in(session, response, settings, issued)
+
+
+# ---------------------------------------------------------------------------
+# Account recovery
+# ---------------------------------------------------------------------------
+
+
+@router.post(
+    "/password-reset",
+    response_model=PasswordResetResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Request a password reset link",
+)
+async def request_password_reset(
+    payload: PasswordResetRequest,
+    request: Request,
+    session: SessionDep,
+    settings: SettingsDep,
+) -> PasswordResetResponse:
+    """Always 202, whether or not the address has an account.
+
+    Same shape and same reasoning as ``POST /auth/magic-link``: an endpoint that
+    answered differently for a registered address would be a free oracle for
+    "is this business a customer of yours?". Shares the login limiter, keyed on
+    address and source, because asking for a reset link is a sign-in attempt by
+    another name.
+    """
+    await request.app.state.login_rate_limiter.check(_login_limiter_key(request, payload.email))
+
+    issued = await AuthService(session, settings).request_password_reset(
+        payload.email,
+        ip_address=client_ip(request),
+        user_agent=request.headers.get("user-agent"),
+    )
+
+    if issued is not None:
+        await stage_password_reset(
+            session,
+            settings,
+            recipient=payload.email.strip().lower(),
+            token=issued.token,
+        )
+
+    # Logged without the outcome, for the reason the magic-link route gives:
+    # "issued: false" at INFO rebuilds the oracle inside the log aggregator.
+    logger.info("password reset requested")
+    return PasswordResetResponse()
+
+
+@router.post(
+    "/password-reset/complete",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Set a new password using a reset link",
+)
+async def complete_password_reset(
+    payload: PasswordResetCompletion,
+    request: Request,
+    session: SessionDep,
+    settings: SettingsDep,
+) -> None:
+    """Consume the link, set the password, sign every device out.
+
+    No session is issued. The person has just chosen a password and can use it;
+    handing back a session here would mean the response to an anonymous,
+    token-bearing request carried an authenticated credential, and there is no
+    reason to add that shape when the login form is one step away.
+
+    Rate-limited by source: without it this endpoint is a token-guessing oracle
+    that happens to be unauthenticated.
+    """
+    await request.app.state.login_rate_limiter.check(
+        f"password-reset-complete|{client_ip(request) or 'unknown'}"
+    )
+    await AuthService(session, settings).reset_password(
+        payload.token,
+        payload.new_password.get_secret_value(),
+        ip_address=client_ip(request),
+        user_agent=request.headers.get("user-agent"),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Email verification
+# ---------------------------------------------------------------------------
+
+
+@router.post(
+    "/verify-email",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Confirm an email address",
+)
+async def verify_email(
+    payload: EmailVerification,
+    request: Request,
+    session: SessionDep,
+    settings: SettingsDep,
+) -> None:
+    """Record that this address is read by the person who claimed it.
+
+    Nothing is gated on verification yet, so this grants no access and refusing
+    it costs nobody anything. Anonymous on purpose: the link is followed from an
+    email client, which is routinely not the browser holding the session.
+    """
+    await request.app.state.login_rate_limiter.check(
+        f"verify-email|{client_ip(request) or 'unknown'}"
+    )
+    await AuthService(session, settings).verify_email(
+        payload.token,
+        ip_address=client_ip(request),
+        user_agent=request.headers.get("user-agent"),
+    )
+
+
+@router.post(
+    "/verify-email/resend",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Send the confirmation email again",
+)
+async def resend_email_verification(
+    principal: PrincipalDep,
+    request: Request,
+    session: SessionDep,
+    settings: SettingsDep,
+) -> None:
+    """For someone whose welcome email never arrived.
+
+    Authenticated, which makes it enumeration-safe by construction: the caller
+    is already proven to hold this account, so there is no uniform-answer dance
+    and no address to probe. An already-verified account is a no-op rather than
+    an error — the caller asked for a state that is already true.
+
+    Not available while impersonating. A support operator who could trigger mail
+    to a customer's inbox could use it to reach them as us.
+    """
+    if principal.is_impersonating:
+        raise AuthorizationError("a verification email cannot be sent while impersonating")
+
+    await request.app.state.login_rate_limiter.check(f"verify-email-resend|{principal.user.id}")
+    if principal.user.email_verified_at is not None:
+        return
+
+    issued = await AuthService(session, settings).issue_email_verification(
+        principal.user,
+        ip_address=client_ip(request),
+        user_agent=request.headers.get("user-agent"),
+    )
+    await stage_email_verification(
+        session, settings, recipient=principal.user.email, token=issued.token
+    )

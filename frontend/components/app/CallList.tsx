@@ -12,6 +12,7 @@
  */
 
 import { Badge } from "@/components/ui/Badge";
+import { CallTagChip } from "@/components/app/CallTagChip";
 import { cx } from "@/components/ui/cx";
 import { ChevronRightIcon } from "@/components/ui/icons";
 import { formatDuration, formatPhone, formatRelative, humanize, initials } from "@/lib/format";
@@ -49,7 +50,10 @@ export function CallList({
     <div>
       <div
         aria-hidden
-        className={cx(grid, "hidden border-b border-line bg-surface-2 px-5 py-2.5 text-xs font-semibold text-muted md:grid")}
+        className={cx(
+          grid,
+          "hidden border-b border-line bg-surface-2 px-5 py-2.5 text-xs font-semibold text-muted md:grid",
+        )}
       >
         <span />
         <span>Caller</span>
@@ -90,10 +94,22 @@ export function CallList({
                   </span>
                   <span className="mt-0.5 line-clamp-2 text-sm text-muted md:line-clamp-1">
                     {compact && call.intent && (
-                      <span className="hidden font-medium text-ink-2 md:inline">{humanize(call.intent)} · </span>
+                      <span className="hidden font-medium text-ink-2 md:inline">
+                        {humanize(call.intent)} ·{" "}
+                      </span>
                     )}
                     {summary}
                   </span>
+                  {call.tags.length > 0 && (
+                    /* Under the summary rather than in a column: a call can
+                       carry several, and a column would either truncate them or
+                       push the time off a narrow screen. */
+                    <span className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                      {call.tags.map((tag) => (
+                        <CallTagChip key={tag.id} tag={tag} />
+                      ))}
+                    </span>
+                  )}
                   <span className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted md:hidden">
                     <span>{formatDuration(call.duration_s)}</span>
                     {call.intent && (
@@ -114,7 +130,9 @@ export function CallList({
                   {formatDuration(call.duration_s)}
                 </span>
                 {!compact && (
-                  <span className="hidden truncate text-sm text-ink-2 md:block">{humanize(call.intent)}</span>
+                  <span className="hidden truncate text-sm text-ink-2 md:block">
+                    {humanize(call.intent)}
+                  </span>
                 )}
                 <span className="hidden justify-end md:flex">
                   <Badge tone={status.tone}>{status.label}</Badge>

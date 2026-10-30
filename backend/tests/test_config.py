@@ -71,7 +71,16 @@ def test_settings_read_from_environment(monkeypatch: pytest.MonkeyPatch) -> None
 
 
 def test_get_settings_is_cached(monkeypatch: pytest.MonkeyPatch) -> None:
+    """One `Settings` per process, so a cached value cannot drift from a fresh read.
+
+    The environment is pinned to a minimal valid set rather than left to read the
+    developer's `.env`. This is the real `get_settings`, so anything invalid in
+    that file — a sender that cannot send, a missing key for a selected provider
+    — would fail this test for a reason that has nothing to do with caching.
+    """
     monkeypatch.setenv("DATABASE_URL", "postgresql+asyncpg://u:p@h/db")
+    monkeypatch.setenv("DRY_RUN", "true")
+    monkeypatch.setenv("EMAIL_PROVIDER", "fake")
     get_settings.cache_clear()
     try:
         assert get_settings() is get_settings()
@@ -221,3 +230,33 @@ def test_redis_is_disabled_by_default() -> None:
 def test_agent_mode_defaults_to_per_tenant() -> None:
     """The POC topology stays the default until tenants are migrated."""
     assert build_settings().default_agent_mode == "per_tenant"
+
+
+def test_no_test_constructs_settings_from_the_developers_environment() -> None:
+    """The suite must behave identically on a laptop and in CI.
+
+    ``conftest`` says so in its first paragraph, and ``build_settings`` passes
+    ``_env_file=None`` to make it true. A bare no-argument ``Settings`` call in a
+    test reads the developer's own ``.env`` instead, so the test is configured by
+    whatever that person happens to have set — and passes in CI, where there is
+    no ``.env``, no matter what it does locally.
+
+    This was not hypothetical: three tests did it, and they only failed once a
+    new validator started rejecting a sender that one developer's ``.env`` had
+    set. The failure had nothing to do with what those tests were about.
+
+    ``Settings(_env_file=None)`` is fine and is excluded: it passes an argument.
+    """
+    import re
+    from pathlib import Path
+
+    offenders: list[str] = []
+    for path in sorted(Path(__file__).resolve().parent.glob("test_*.py")):
+        for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            if re.search(r"(?<![\w.])Settings\(\s*\)", line):
+                offenders.append(f"{path.name}:{number}")
+
+    assert not offenders, (
+        "build settings with build_settings() rather than a no-argument "
+        "constructor, at: " + ", ".join(offenders)
+    )

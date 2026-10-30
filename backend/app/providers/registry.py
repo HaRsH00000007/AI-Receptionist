@@ -133,5 +133,12 @@ def _build_email(settings: Settings) -> EmailProvider:
             from app.providers.real.mail import SendGridProvider
 
             return SendGridProvider(settings)
+        case "smtp":
+            # Local Mailpit. Had no adapter until now, so this setting silently
+            # resolved to the fake and nothing ever arrived in the inbox it
+            # names.
+            from app.providers.real.smtp import SmtpProvider
+
+            return SmtpProvider(settings)
         case _:
             return FakeEmailProvider()

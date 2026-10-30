@@ -59,9 +59,11 @@ from app.core.errors import (
     InvalidInputError,
 )
 from app.core.logging import get_logger
+from app.models.auth_token import AuthToken
 from app.models.enums import (
     ActorType,
     AuditAction,
+    AuthTokenPurpose,
     MembershipRole,
     SessionStatus,
     UserStatus,
@@ -81,6 +83,18 @@ class IssuedToken:
 
     token: str
     session: Session
+
+
+@dataclass(frozen=True, slots=True)
+class IssuedAuthToken:
+    """A single-use credential and its row. The plain value exists only here.
+
+    Separate from :class:`IssuedToken` because that one *is* a session and this
+    one deliberately is not — see :class:`app.models.auth_token.AuthToken`.
+    """
+
+    token: str
+    row: AuthToken
 
 
 @dataclass(frozen=True, slots=True)
@@ -624,6 +638,293 @@ class AuthService:
     # ---------------------------------------------------------------------
     # Lookups
     # ---------------------------------------------------------------------
+
+    # ---------------------------------------------------------------------
+    # Account recovery and email verification
+    # ---------------------------------------------------------------------
+    async def request_password_reset(
+        self,
+        email: str,
+        *,
+        ip_address: str | None = None,
+        user_agent: str | None = None,
+    ) -> IssuedAuthToken | None:
+        """Issue a reset link, or return ``None`` if there is no account.
+
+        The ``None`` is for the caller's benefit — it decides whether to queue an
+        email — and must never reach the client, exactly as for
+        :meth:`request_magic_link`. A reset endpoint that 404s on an unknown
+        address is a free "is this address registered?" oracle, and it is the
+        one people forget to make uniform because the happy path works either
+        way.
+
+        Any outstanding reset token is superseded. Two live reset links for one
+        account means an old one, possibly in a mailbox somebody else now reads,
+        still works after the person has already used the new one.
+        """
+        now = datetime.now(UTC)
+        normalized = email.strip().lower()
+        user = await self._user_by_email(normalized)
+
+        if user is None or user.status is not UserStatus.ACTIVE:
+            # Audited even though nothing was issued: a run of these against
+            # different addresses is what enumeration looks like, and this is
+            # where it becomes visible.
+            self.audit.record(
+                AuditAction.PASSWORD_RESET_REQUESTED,
+                actor_type=ActorType.SYSTEM,
+                actor_label=normalized,
+                ip_address=ip_address,
+                user_agent=user_agent,
+                meta={"issued": False, "reason": "no_active_account"},
+            )
+            return None
+
+        superseded = await self._supersede_auth_tokens(
+            user.id, AuthTokenPurpose.PASSWORD_RESET, now
+        )
+        issued = self._issue_auth_token(
+            user,
+            purpose=AuthTokenPurpose.PASSWORD_RESET,
+            ttl_s=self.settings.password_reset_ttl_s,
+            now=now,
+            ip_address=ip_address,
+            user_agent=user_agent,
+        )
+        self.audit.record(
+            AuditAction.PASSWORD_RESET_REQUESTED,
+            actor_type=ActorType.SYSTEM,
+            actor=user,
+            ip_address=ip_address,
+            user_agent=user_agent,
+            meta={"issued": True, "superseded": superseded},
+        )
+        return issued
+
+    async def reset_password(
+        self,
+        token: str,
+        new_password: str,
+        *,
+        ip_address: str | None = None,
+        user_agent: str | None = None,
+    ) -> User:
+        """Consume a reset link and set the password.
+
+        Three things happen together, and all three matter:
+
+        * **The token is consumed**, so a forwarded email stops working the
+          moment the first reader has used it.
+        * **Every session is revoked**, including any the attacker already had.
+          A reset is what someone does when they think another person is in
+          their account; leaving that person signed in would make it decorative.
+          This is stricter than :meth:`change_password`, which keeps the caller's
+          own session — here there is no caller session to keep.
+        * **The address is marked verified.** Following a link to an inbox is the
+          same proof a magic link gives, and it is the only proof we accept.
+
+        Refused uniformly: an expired token, a used one, one for a disabled
+        account and one that never existed all raise the same error. Telling
+        them apart tells an attacker which half of the problem to keep working
+        on.
+        """
+        now = datetime.now(UTC)
+        row = await self._consume_auth_token(token, AuthTokenPurpose.PASSWORD_RESET, now)
+        user = await self.session.get(User, row.user_id) if row is not None else None
+
+        if row is None or user is None or user.status is not UserStatus.ACTIVE:
+            self.audit.record(
+                AuditAction.LOGIN_FAILED,
+                actor_type=ActorType.SYSTEM,
+                actor=user,
+                ip_address=ip_address,
+                user_agent=user_agent,
+                meta={"method": "password_reset", "reason": "invalid_or_expired_token"},
+            )
+            raise AuthenticationError("invalid or expired reset link")
+
+        user.password_hash = hash_password(new_password)
+        if user.email_verified_at is None:
+            user.email_verified_at = now
+
+        revoked = await self._revoke_all_sessions(user.id, now)
+        # Any *other* outstanding reset link is now pointless and must not
+        # remain usable.
+        await self._supersede_auth_tokens(user.id, AuthTokenPurpose.PASSWORD_RESET, now)
+
+        self.audit.record(
+            AuditAction.PASSWORD_RESET_COMPLETED,
+            actor_type=ActorType.USER,
+            actor=user,
+            ip_address=ip_address,
+            user_agent=user_agent,
+            meta={"sessions_revoked": revoked},
+        )
+        logger.info(
+            "password reset completed",
+            extra={"user_id": str(user.id), "sessions_revoked": revoked},
+        )
+        return user
+
+    async def issue_email_verification(
+        self,
+        user: User,
+        *,
+        ip_address: str | None = None,
+        user_agent: str | None = None,
+    ) -> IssuedAuthToken:
+        """A link that confirms the address is read by the person who claimed it.
+
+        Always issues, and supersedes any earlier one. Unlike the two above
+        there is nothing to hide here: the caller either just created this
+        account or is signed into it, so no uniform-answer dance is needed.
+        """
+        now = datetime.now(UTC)
+        await self._supersede_auth_tokens(user.id, AuthTokenPurpose.EMAIL_VERIFICATION, now)
+        issued = self._issue_auth_token(
+            user,
+            purpose=AuthTokenPurpose.EMAIL_VERIFICATION,
+            ttl_s=self.settings.email_verification_ttl_s,
+            now=now,
+            ip_address=ip_address,
+            user_agent=user_agent,
+        )
+        self.audit.record(
+            AuditAction.EMAIL_VERIFICATION_REQUESTED,
+            actor_type=ActorType.USER,
+            actor=user,
+            ip_address=ip_address,
+            user_agent=user_agent,
+        )
+        return issued
+
+    async def verify_email(
+        self,
+        token: str,
+        *,
+        ip_address: str | None = None,
+        user_agent: str | None = None,
+    ) -> User:
+        """Consume a verification link and record the address as proven.
+
+        Verification is not a gate anywhere yet — nothing refuses an unverified
+        account — so this grants no access. It is recorded because the column
+        has to mean something before anything can be built on it.
+        """
+        now = datetime.now(UTC)
+        row = await self._consume_auth_token(token, AuthTokenPurpose.EMAIL_VERIFICATION, now)
+        user = await self.session.get(User, row.user_id) if row is not None else None
+
+        if row is None or user is None or user.status is not UserStatus.ACTIVE:
+            raise AuthenticationError("invalid or expired verification link")
+
+        already = user.email_verified_at is not None
+        if not already:
+            user.email_verified_at = now
+
+        self.audit.record(
+            AuditAction.EMAIL_VERIFIED,
+            actor_type=ActorType.USER,
+            actor=user,
+            ip_address=ip_address,
+            user_agent=user_agent,
+            meta={"already_verified": already},
+        )
+        return user
+
+    # ---- single-use credentials ------------------------------------------
+    def _issue_auth_token(
+        self,
+        user: User,
+        *,
+        purpose: AuthTokenPurpose,
+        ttl_s: int,
+        now: datetime,
+        ip_address: str | None,
+        user_agent: str | None,
+    ) -> IssuedAuthToken:
+        """Create the row. The plain token is returned and never stored."""
+        token = generate_token()
+        row = AuthToken(
+            user_id=user.id,
+            purpose=purpose,
+            token_hash=hash_token(token),
+            expires_at=now + timedelta(seconds=ttl_s),
+            ip_address=ip_address[:45] if ip_address else None,
+            user_agent=user_agent[:1024] if user_agent else None,
+        )
+        self.session.add(row)
+        return IssuedAuthToken(token=token, row=row)
+
+    async def _consume_auth_token(
+        self, token: str, purpose: AuthTokenPurpose, now: datetime
+    ) -> AuthToken | None:
+        """Mark a token used, if it is usable. ``None`` for every other case.
+
+        Matched by hash *and* purpose: a verification token presented to the
+        reset endpoint must not work. Without the purpose check, the weakest
+        link in the set would set the strength of all of them — a day-long
+        verification token would become a day-long password-reset token.
+        """
+        row = (
+            await self.session.execute(
+                select(AuthToken)
+                .where(
+                    AuthToken.token_hash == hash_token(token),
+                    AuthToken.purpose == purpose,
+                )
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+
+        if row is None or not row.is_usable_at(now):
+            return None
+        row.consumed_at = now
+        return row
+
+    async def _supersede_auth_tokens(
+        self, user_id: uuid.UUID, purpose: AuthTokenPurpose, now: datetime
+    ) -> int:
+        """Retire this user's outstanding tokens of one purpose. Returns the count.
+
+        Marked consumed rather than deleted, so "this link had already been
+        replaced" is still answerable afterwards.
+        """
+        rows = (
+            (
+                await self.session.execute(
+                    select(AuthToken).where(
+                        AuthToken.user_id == user_id,
+                        AuthToken.purpose == purpose,
+                        AuthToken.consumed_at.is_(None),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        for row in rows:
+            row.consumed_at = now
+        return len(rows)
+
+    async def _revoke_all_sessions(self, user_id: uuid.UUID, now: datetime) -> int:
+        """Sign every device out. Returns the number revoked."""
+        rows = (
+            (
+                await self.session.execute(
+                    select(Session).where(
+                        Session.user_id == user_id,
+                        Session.status == SessionStatus.ACTIVE,
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        for row in rows:
+            row.status = SessionStatus.REVOKED
+            row.revoked_at = now
+        return len(rows)
 
     async def _user_by_email(self, email: str) -> User | None:
         result = await self.session.execute(select(User).where(User.email == email).limit(1))

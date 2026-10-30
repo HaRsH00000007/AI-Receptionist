@@ -48,7 +48,7 @@ from app.provisioning.context import StepContext
 from app.provisioning.registry import implementation_for
 from app.provisioning.retry import next_attempt_at, should_retry
 from app.services.idempotency import step_idempotency_key
-from app.services.notifications import NotificationService
+from app.services.tenant_notifications import stage_provisioning_failure
 
 logger = get_logger(__name__)
 
@@ -378,15 +378,16 @@ class ProvisioningEngine:
         await compensate_run(
             session, run=run, tenant=tenant, providers=self.providers, settings=self.settings
         )
-        try:
-            await NotificationService(self.providers.email, self.settings).send_failure(
-                tenant=tenant, reason=reason
-            )
-        except AppError as exc:
-            logger.warning(
-                "failure notification could not be sent",
-                extra={"tenant_id": str(tenant.id), "code": exc.code},
-            )
+        # Queued, not sent. Compensation has already released whatever the run
+        # bought; an email provider being down must not be able to undo that or
+        # to lose the only message telling the customer what happened.
+        #
+        # Committed here because this is worker-side code with no request-scoped
+        # unit of work to do it: the inline sender it replaces needed no commit,
+        # and leaving one out would have staged the row and dropped it when the
+        # session closed — an obligation that existed only in memory.
+        await stage_provisioning_failure(session, self.settings, tenant=tenant, reason=reason)
+        await session.commit()
 
     # ---- step selection --------------------------------------------------
     async def _next_pending_step(

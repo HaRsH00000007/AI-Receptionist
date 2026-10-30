@@ -32,11 +32,11 @@ import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Card, CardHeader } from "@/components/ui/Card";
 import { Skeleton } from "@/components/ui/Feedback";
-import { ChoiceGroup, SelectField, TextAreaField, TextField } from "@/components/ui/Field";
+import { Toggle } from "@/components/ui/Toggle";
+import { ChoiceGroup, TextAreaField, TextField } from "@/components/ui/Field";
 import {
   ArrowLeftIcon,
   ArrowRightIcon,
-  CheckIcon,
   ChevronDownIcon,
   GlobeIcon,
   PlusIcon,
@@ -53,6 +53,7 @@ import {
   searchAvailableNumbers,
   startWebsiteSetup,
 } from "@/lib/api";
+import { VoicePicker } from "@/components/app/VoicePicker";
 import { formatPhone } from "@/lib/format";
 import { GREETING_MAX_LENGTH } from "@/lib/greetings";
 import {
@@ -94,7 +95,11 @@ const STEPS: Record<Step, { label: string; title: string; description?: string }
     title: "What info do you want to ask callers for?",
     description: "Your receptionist asks for these during the call.",
   },
-  5: { label: "Voice", title: "Select a voice for your agent", description: "You can change this later." },
+  5: {
+    label: "Voice",
+    title: "Select a voice for your agent",
+    description: "You can change this later.",
+  },
   6: { label: "Greeting", title: "How should your agent introduce itself?" },
   7: { label: "Number", title: "Last step — pick a number" },
 };
@@ -508,13 +513,9 @@ export function WebsiteWizard({
             <KnowledgeReview knowledge={knowledge} crawl={job?.crawl ?? null} onChange={setKnowledge} />
           )}
 
-          {step === 4 && knowledge && (
-            <Questions knowledge={knowledge} onChange={setKnowledge} />
-          )}
+          {step === 4 && knowledge && <Questions knowledge={knowledge} onChange={setKnowledge} />}
 
-          {step === 5 && (
-            <Voices voices={voices} voiceId={voiceId} onPick={setVoiceId} />
-          )}
+          {step === 5 && <Voices voices={voices} voiceId={voiceId} onPick={setVoiceId} />}
 
           {step === 6 && (
             <Card className="p-5 sm:p-6">
@@ -875,6 +876,13 @@ function Questions({
   );
 }
 
+/**
+ * The voice screen.
+ *
+ * The cards, the samples and the "show more" are all
+ * :component:`VoicePicker`, which the Agent settings panel uses too — so the
+ * "you can change this later" above is the same screen, later.
+ */
 function Voices({
   voices,
   voiceId,
@@ -884,44 +892,16 @@ function Voices({
   voiceId: string;
   onPick: (value: string) => void;
 }) {
-  return (
-    <div className="space-y-4">
-      <div className="flex justify-center">
-        <SelectField
-          label="Language"
-          value="en"
-          onChange={() => undefined}
-          options={[{ value: "en", label: "English" }]}
-          hint="English is the only language your receptionist speaks today."
-          className="w-48"
-        />
+  if (voices.length === 0) {
+    return (
+      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+        <Skeleton className="h-40 rounded-xl" />
+        <Skeleton className="h-40 rounded-xl" />
+        <Skeleton className="h-40 rounded-xl" />
       </div>
-      {voices.length === 0 ? (
-        <div className="grid gap-3 sm:grid-cols-3">
-          <Skeleton className="h-28 rounded-xl" />
-          <Skeleton className="h-28 rounded-xl" />
-          <Skeleton className="h-28 rounded-xl" />
-        </div>
-      ) : (
-        <ChoiceGroup
-          legend="Voice"
-          hideLegend
-          name="voice_id"
-          value={voiceId}
-          onChange={onPick}
-          columns={3}
-          options={voices.map((voice) => ({
-            value: voice.voice_id,
-            label: voice.label,
-            description: voice.style ? `${voice.style} tone` : "The configured default",
-          }))}
-        />
-      )}
-      <p className="text-center text-xs text-muted">
-        These are the voices this workspace is set up for.
-      </p>
-    </div>
-  );
+    );
+  }
+  return <VoicePicker voices={voices} voiceId={voiceId} onPick={onPick} />;
 }
 
 function NumberPicker({
@@ -1168,46 +1148,6 @@ function AddRow({ label, onAdd }: { label: string; onAdd: () => void }) {
     <Button variant="ghost" size="sm" leadingIcon={<PlusIcon size={15} />} onClick={onAdd}>
       {label}
     </Button>
-  );
-}
-
-/** A switch. A real checkbox underneath, so it is keyboard- and AT-operable. */
-function Toggle({
-  label,
-  on,
-  onToggle,
-}: {
-  label: string;
-  on: boolean;
-  onToggle: (on: boolean) => void;
-}) {
-  return (
-    <label className="relative inline-flex shrink-0 cursor-pointer items-center">
-      <input
-        type="checkbox"
-        className="peer sr-only"
-        checked={on}
-        aria-label={label}
-        onChange={(event) => onToggle(event.target.checked)}
-      />
-      <span
-        className={
-          on
-            ? "flex h-6 w-10 items-center rounded-full bg-accent px-0.5 transition-colors peer-focus-visible:outline peer-focus-visible:outline-2 peer-focus-visible:outline-offset-2 peer-focus-visible:outline-accent"
-            : "flex h-6 w-10 items-center rounded-full bg-line px-0.5 transition-colors peer-focus-visible:outline peer-focus-visible:outline-2 peer-focus-visible:outline-offset-2 peer-focus-visible:outline-accent"
-        }
-      >
-        <span
-          className={
-            on
-              ? "flex size-5 translate-x-4 items-center justify-center rounded-full bg-surface text-accent transition-transform"
-              : "size-5 rounded-full bg-surface transition-transform"
-          }
-        >
-          {on && <CheckIcon size={12} />}
-        </span>
-      </span>
-    </label>
   );
 }
 

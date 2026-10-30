@@ -32,8 +32,9 @@ from fastapi import APIRouter, Request, Response, status
 from sqlalchemy import select
 
 from app.api.auth_deps import PrincipalDep
-from app.api.deps import SettingsDep, TemporalClientDep
+from app.api.deps import CacheDep, ProvidersDep, SettingsDep, TemporalClientDep
 from app.api.v1.signups import _start_workflow
+from app.cache.client import CacheClient
 from app.core.config import Settings
 from app.core.correlation import get_correlation_id, new_correlation_id
 from app.core.errors import AuthorizationError, ConflictError, InvalidInputError, NotFoundError
@@ -48,6 +49,7 @@ from app.models.enums import (
     WebsiteOnboardingStatus,
 )
 from app.models.website_onboarding import WebsiteOnboarding
+from app.providers.registry import Providers
 from app.schemas.signup import OnboardingRequest, SignupResponse
 from app.schemas.website import (
     ChoicesUpdate,
@@ -61,17 +63,13 @@ from app.schemas.website import (
 from app.services.audit import AuditService
 from app.services.signup import SignupService
 from app.services.status_tokens import issue_status_token
+from app.services.voice_catalogue import SUPPORTED_LANGUAGES, VoiceCatalogue
 from app.services.website_onboarding import BUILTIN_QUESTIONS
 from app.website import guard
 
 logger = get_logger(__name__)
 
 router = APIRouter(prefix="/website-setup", tags=["website setup"])
-
-#: The one language the call path sends. ``app.providers.real.voice`` hardcodes
-#: ``"language": "en"`` in the agent body, so offering another would be a lie
-#: told in a dropdown. When the adapter learns to send it, this grows.
-SUPPORTED_LANGUAGES = ("en",)
 
 
 async def _job(session: SessionDep, user_id: uuid.UUID) -> WebsiteOnboarding | None:
@@ -282,9 +280,15 @@ def _knowledge_document(payload: KnowledgeUpdate) -> dict[str, Any]:
 
 
 def _merged_choices(
-    payload: ChoicesUpdate, settings: Settings, existing: dict[str, Any] | None
+    payload: ChoicesUpdate, allowed_voices: set[str], existing: dict[str, Any] | None
 ) -> dict[str, Any]:
-    """Validate the last few screens and fold them into what is already there."""
+    """Validate the last few screens and fold them into what is already there.
+
+    ``allowed_voices`` is asked of the catalogue by the caller rather than read
+    from configuration here: the picker offers the whole account, and a check
+    against the three configured style defaults would refuse every voice it
+    showed.
+    """
     if payload.language not in SUPPORTED_LANGUAGES:
         # Refused rather than stored-and-ignored: a saved "fr" that the call
         # path never sends would be a promise the product does not keep.
@@ -292,7 +296,7 @@ def _merged_choices(
             "English is the only language the receptionist speaks today.",
             details={"field": "language"},
         )
-    if payload.voice_id and payload.voice_id not in _voice_ids(settings):
+    if payload.voice_id and payload.voice_id not in allowed_voices:
         raise InvalidInputError("That voice isn't available.", details={"field": "voice_id"})
 
     merged = dict(existing or {})
@@ -327,11 +331,17 @@ async def save_knowledge(
     "/choices", response_model=WebsiteSetupView, summary="Save voice, greeting and number choices"
 )
 async def save_choices(
-    payload: ChoicesUpdate, principal: PrincipalDep, session: SessionDep, settings: SettingsDep
+    payload: ChoicesUpdate,
+    principal: PrincipalDep,
+    session: SessionDep,
+    settings: SettingsDep,
+    providers: ProvidersDep,
+    cache: CacheDep,
 ) -> WebsiteSetupView:
     job = await _require_job(session, principal.user.id)
     _require_editable(job)
-    job.choices_json = _merged_choices(payload, settings, job.choices_json)
+    allowed = await _allowed_voice_ids(settings, providers, cache)
+    job.choices_json = _merged_choices(payload, allowed, job.choices_json)
     return await _saved_view(session, job)
 
 
@@ -340,26 +350,35 @@ async def save_choices(
     response_model=list[VoiceOptionView],
     summary="The voices this deployment can use",
 )
-async def voices(principal: PrincipalDep, settings: SettingsDep) -> list[VoiceOptionView]:
-    """Exactly the configured voices, with no invented extras.
+async def voices(
+    principal: PrincipalDep,
+    settings: SettingsDep,
+    providers: ProvidersDep,
+    cache: CacheDep,
+) -> list[VoiceOptionView]:
+    """The account's own catalogue, filtered to voices that can answer a call.
 
-    ``ELEVENLABS_VOICE_MAP`` is the source of truth: a voice that is not in it
-    has never been checked against this account and would fail on publish.
+    Read from the vendor rather than from configuration: it holds the names,
+    the sentences and the samples, and it changes them without telling us. A
+    vendor that cannot be reached falls back to the configured voices, which is
+    a shorter picker rather than a blocked signup
+    (:mod:`app.services.voice_catalogue`).
     """
     del principal  # authorization only
-    options: list[VoiceOptionView] = []
-    for style, voice_id in settings.voice_map.items():
-        options.append(
-            VoiceOptionView(voice_id=voice_id, label=style.replace("_", " ").title(), style=style)
-        )
-    default = settings.elevenlabs_default_voice_id
-    if default and default not in {option.voice_id for option in options}:
-        options.append(VoiceOptionView(voice_id=default, label="Default", style=None))
-    return options
+    return await VoiceCatalogue(settings, providers.elevenlabs, cache).options()
 
 
-def _voice_ids(settings: Settings) -> set[str]:
-    return {*settings.voice_map.values(), settings.elevenlabs_default_voice_id}
+async def _allowed_voice_ids(
+    settings: Settings, providers: Providers, cache: CacheClient | None = None
+) -> set[str]:
+    """Which voice ids a customer may choose right now.
+
+    Asked of the catalogue rather than of ``ELEVENLABS_VOICE_MAP``, because the
+    map holds three style defaults and the picker offers the whole account. The
+    configured ids are always included, so a deployment whose vendor is down
+    can still save the voice it publishes with by default.
+    """
+    return await VoiceCatalogue(settings, providers.elevenlabs, cache).voice_ids()
 
 
 def _require_editable(job: WebsiteOnboarding) -> None:
@@ -386,6 +405,8 @@ async def confirm(
     response: Response,
     session: SessionDep,
     settings: SettingsDep,
+    providers: ProvidersDep,
+    cache: CacheDep,
     temporal: TemporalClientDep,
     payload: ConfirmRequest | None = None,
 ) -> SignupResponse:
@@ -423,8 +444,9 @@ async def confirm(
     # is saved step by step and another when it arrives all at once.
     if payload is not None and payload.knowledge is not None:
         job.knowledge_json = _knowledge_document(payload.knowledge)
+    allowed_voices = await _allowed_voice_ids(settings, providers, cache)
     if payload is not None and payload.choices is not None:
-        job.choices_json = _merged_choices(payload.choices, settings, job.choices_json)
+        job.choices_json = _merged_choices(payload.choices, allowed_voices, job.choices_json)
 
     knowledge = dict(job.knowledge_json or {})
     choices = dict(job.choices_json or {})
@@ -456,7 +478,7 @@ async def confirm(
         ]
         profile.sms_templates_json = knowledge.get("sms_templates", [])
         voice_id = str(choices.get("voice_id") or "")
-        if voice_id in _voice_ids(settings):
+        if voice_id in allowed_voices:
             profile.voice_id = voice_id
 
     job.tenant_id = result.tenant.id

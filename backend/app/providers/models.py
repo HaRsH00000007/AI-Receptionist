@@ -55,6 +55,62 @@ class AgentRef(ProviderModel):
     system_prompt: str | None = None
 
 
+class Delivery(ProviderModel):
+    """How the agent speaks, as opposed to what it says.
+
+    Two settings the vendor owns, carried together because they are chosen
+    together and pushed together:
+
+    * ``speed`` is a multiplier on the voice. ElevenLabs accepts 0.7 to 1.2 and
+      refuses anything else, which was checked against the live API.
+    * ``eagerness`` is the vendor's own word — ``patient``, ``normal`` or
+      ``eager`` — for how long it waits before deciding a caller has finished.
+      Translated from our own enum by the service, so the adapter is handed the
+      vendor's vocabulary and nothing has to guess at it twice.
+
+    ``None`` on either means "send nothing and take the vendor's default",
+    which is how every agent behaved before these were configurable.
+    """
+
+    speed: float | None = None
+    eagerness: str | None = None
+
+
+class VoiceRef(ProviderModel):
+    """One voice the vendor offers, as the vendor describes it.
+
+    Everything here comes from ElevenLabs' own catalogue — the name, the
+    sentence under it and the sample a customer listens to. None of it is
+    written by us, because a voice described in our words is a description that
+    goes stale the moment the vendor retunes it, and a sample we generated is a
+    sample of a different model than the one that answers the phone.
+
+    Every field but the id is optional. The catalogue is read defensively: a
+    voice that loses its ``description`` should lose a line of copy, not drop
+    out of the picker.
+    """
+
+    voice_id: str
+    #: As listed, which is often "Sarah - Mature, Reassuring, Confident". The
+    #: short name and the tagline are separated where it is shown, not here.
+    name: str
+    description: str | None = None
+    #: From the vendor's labels: "american", "british", "female", "young"...
+    accent: str | None = None
+    gender: str | None = None
+    age: str | None = None
+    use_case: str | None = None
+    #: Two-letter code. Only English voices are offered today, because the call
+    #: path sends ``"language": "en"`` and nothing else.
+    language: str | None = None
+    #: A public MP3 of this voice, played in the browser. ``None`` when the
+    #: vendor has no sample, which the picker shows as "no sample".
+    preview_url: str | None = None
+    #: ``premade``, ``professional``, ``cloned``... Shown nowhere; used to keep
+    #: the recommended list to voices the account is entitled to.
+    category: str | None = None
+
+
 class TransferTarget(ProviderModel):
     """One destination the voice agent may hand a live call to.
 

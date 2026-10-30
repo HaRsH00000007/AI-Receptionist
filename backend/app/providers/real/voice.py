@@ -6,7 +6,22 @@ authoring; the fake provider is what CI exercises, and the response parsing is
 written defensively so a renamed field degrades to ``None`` rather than a crash.
 Point ``ELEVENLABS_PROVIDER=elevenlabs`` at a real key to try it — see README.
 
-One exception to that: ``_built_in_tools`` **has** been checked against the
+Three exceptions to that.
+
+``tts.speed`` and ``turn.turn_eagerness`` **have** been checked against the live
+API, on a throwaway agent that was created, written to, read back and deleted.
+The vendor accepted ``speed`` between 0.7 and 1.2 and refused 0.6 and 2.5 by
+name; it accepted ``turn_eagerness`` of ``eager`` and refused ``low``/``high``
+with "Input should be 'patient', 'normal' or 'eager'". Both ranges in this file
+are the vendor's own, not a guess.
+
+``list_voices`` **has** been checked against the live
+API: ``GET /v1/voices`` returned the account's catalogue with the name, the
+``labels`` (accent, gender, age, language, descriptive, use case), the
+``description`` sentence and a public ``preview_url`` per voice, which is
+exactly what is parsed below.
+
+And ``_built_in_tools`` **has** been checked against the
 live API, on a throwaway agent. The vendor accepted the payload as written and
 stored both transfer types (``warm`` as ``conference``, ``cold`` as ``blind``),
 a later push with no transfers cleared ``transfer_to_number`` to ``null``, and
@@ -21,7 +36,26 @@ from typing import Any
 from app.core.config import Settings
 from app.core.errors import VendorError
 from app.providers.http import ProviderHTTPClient
-from app.providers.models import AgentRef, PhoneNumberRef, TransferTarget
+from app.providers.models import AgentRef, Delivery, PhoneNumberRef, TransferTarget, VoiceRef
+
+
+def _text(value: Any) -> str | None:
+    """A non-empty string, or nothing. Keeps "" out of optional fields."""
+    text = str(value).strip() if value is not None else ""
+    return text or None
+
+
+def _label(value: Any) -> str | None:
+    """A vendor label, lower-cased, with any locale prefix dropped.
+
+    ``accent`` comes back as "american" on some voices and "en-american" on
+    others. The part before the dash is the language, which is read from its
+    own label, so keeping it here would print "En-american" on a card.
+    """
+    text = _text(value)
+    if text is None:
+        return None
+    return text.rsplit("-", 1)[-1].lower()
 
 
 def _agent_ref(payload: dict[str, Any]) -> AgentRef:
@@ -145,21 +179,29 @@ class ElevenLabsRestProvider:
         first_message: str,
         voice_id: str,
         transfers: Sequence[TransferTarget] = (),
+        delivery: Delivery | None = None,
     ) -> dict[str, Any]:
-        return {
-            "name": name,
-            "conversation_config": {
-                "agent": {
-                    "prompt": {
-                        "prompt": system_prompt,
-                        "built_in_tools": self._built_in_tools(transfers),
-                    },
-                    "first_message": first_message,
-                    "language": "en",
+        tts: dict[str, Any] = {"voice_id": voice_id}
+        conversation: dict[str, Any] = {
+            "agent": {
+                "prompt": {
+                    "prompt": system_prompt,
+                    "built_in_tools": self._built_in_tools(transfers),
                 },
-                "tts": {"voice_id": voice_id},
+                "first_message": first_message,
+                "language": "en",
             },
+            "tts": tts,
         }
+        # Omitted rather than sent as a default. The vendor's own defaults are
+        # what every agent had before these were configurable, and writing
+        # "speed: 1.0" would make a reset indistinguishable from a choice in the
+        # vendor's audit of the agent.
+        if delivery is not None and delivery.speed is not None:
+            tts["speed"] = delivery.speed
+        if delivery is not None and delivery.eagerness is not None:
+            conversation["turn"] = {"turn_eagerness": delivery.eagerness}
+        return {"name": name, "conversation_config": conversation}
 
     async def create_agent(
         self,
@@ -169,6 +211,7 @@ class ElevenLabsRestProvider:
         first_message: str,
         voice_id: str,
         transfers: Sequence[TransferTarget] = (),
+        delivery: Delivery | None = None,
     ) -> AgentRef:
         payload = await self._client.post(
             "/v1/convai/agents/create",
@@ -178,6 +221,7 @@ class ElevenLabsRestProvider:
                 first_message=first_message,
                 voice_id=voice_id,
                 transfers=transfers,
+                delivery=delivery,
             ),
         )
         if not payload or "agent_id" not in payload:
@@ -201,6 +245,40 @@ class ElevenLabsRestProvider:
             raise
         return _agent_ref(payload)
 
+    async def list_voices(self) -> Sequence[VoiceRef]:
+        """The account's voice catalogue.
+
+        One unpaginated read; the account holds tens of voices, not thousands.
+        Parsed field by field so a renamed label costs that one detail rather
+        than the whole picker — a voice with no ``description`` is still a
+        voice somebody can choose and listen to.
+        """
+        payload = await self._client.get("/v1/voices")
+        voices: list[VoiceRef] = []
+        for entry in (payload or {}).get("voices", []):
+            voice_id = entry.get("voice_id")
+            if not voice_id:
+                continue
+            labels = entry.get("labels") or {}
+            voices.append(
+                VoiceRef(
+                    voice_id=str(voice_id),
+                    name=str(entry.get("name") or voice_id),
+                    description=_text(entry.get("description")),
+                    # The accent label is sometimes bare ("american") and
+                    # sometimes locale-prefixed ("en-american"); the prefix is
+                    # the language, which is carried separately.
+                    accent=_label(labels.get("accent")),
+                    gender=_label(labels.get("gender")),
+                    age=_label(labels.get("age")),
+                    use_case=_label(labels.get("use_case")),
+                    language=_label(labels.get("language")),
+                    preview_url=_text(entry.get("preview_url")),
+                    category=_text(entry.get("category")),
+                )
+            )
+        return voices
+
     async def find_agent_by_name(self, *, name: str) -> AgentRef | None:
         payload = await self._client.get("/v1/convai/agents", params={"page_size": 100})
         for entry in (payload or {}).get("agents", []):
@@ -217,6 +295,7 @@ class ElevenLabsRestProvider:
         first_message: str,
         voice_id: str,
         transfers: Sequence[TransferTarget] = (),
+        delivery: Delivery | None = None,
     ) -> AgentRef:
         await self._client.patch(
             f"/v1/convai/agents/{agent_id}",
@@ -226,6 +305,7 @@ class ElevenLabsRestProvider:
                 first_message=first_message,
                 voice_id=voice_id,
                 transfers=transfers,
+                delivery=delivery,
             ),
         )
         updated = await self.get_agent(agent_id=agent_id)

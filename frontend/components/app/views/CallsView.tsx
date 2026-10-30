@@ -8,19 +8,22 @@
  * so when the window is full rather than implying it searched everything.
  */
 
-import { useSearchParams } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { useMemo, useState } from "react";
 
 import { CallDetailDrawer } from "@/components/app/CallDetailDrawer";
 import { CallList } from "@/components/app/CallList";
 import { CALL_FETCH_LIMIT, useTenantData } from "@/components/app/TenantWorkspace";
+import { useLoad } from "@/components/app/useLoad";
 import { useNow } from "@/components/app/useNow";
+import { Alert } from "@/components/ui/Alert";
 import { Button } from "@/components/ui/Button";
 import { Card, CardHeader } from "@/components/ui/Card";
 import { EmptyState } from "@/components/ui/Feedback";
 import { SelectField, TextField } from "@/components/ui/Field";
 import { ListIcon, RefreshIcon, SearchIcon } from "@/components/ui/icons";
 import { PageHeader } from "@/components/ui/PageHeader";
+import { listCallTags, listCalls } from "@/lib/api";
 import { humanize, pluralize } from "@/lib/format";
 import { CALL_STATUS_FILTERS, callMatchesStatusFilter, isUrgent } from "@/lib/status";
 import type { CallView } from "@/lib/types";
@@ -53,6 +56,7 @@ export function CallsView() {
       key={params.toString()}
       initialStatus={params.get("status") ?? ""}
       initialUrgent={params.get("urgent") === "1"}
+      tag={params.get("tag") ?? ""}
     />
   );
 }
@@ -68,7 +72,9 @@ function matchesQuery(call: CallView, query: string): boolean {
   const digits = needle.replace(/\D/g, "");
   return (
     digits.length >= 3 &&
-    [call.from_e164, call.callback_number].some((number) => number?.replace(/\D/g, "").includes(digits))
+    [call.from_e164, call.callback_number].some((number) =>
+      number?.replace(/\D/g, "").includes(digits),
+    )
   );
 }
 
@@ -96,12 +102,32 @@ function withinDuration(call: CallView, duration: DurationRange): boolean {
 function CallsExplorer({
   initialStatus,
   initialUrgent,
+  tag,
 }: {
   initialStatus: string;
   initialUrgent: boolean;
+  /**
+   * A tag id from `?tag=`. Unlike every other filter on this page it is applied
+   * by the **server**: narrowing the hundred calls the workspace already loaded
+   * would answer "which of these carry the tag", which is a different question
+   * from "which calls carry the tag".
+   */
+  tag: string;
 }) {
-  const { calls, refresh, refreshing } = useTenantData();
+  const { tenantId, calls: recent, refresh, refreshing } = useTenantData();
   const now = useNow();
+  const router = useRouter();
+
+  const tagged = useLoad(
+    () =>
+      tag ? listCalls(tenantId, undefined, { tag, limit: CALL_FETCH_LIMIT }) : Promise.resolve([]),
+    `tagged-calls:${tenantId}:${tag}`,
+  );
+  const tagList = useLoad(() => listCallTags(tenantId), `call-tags:${tenantId}`);
+  // Memoised because `?? []` is a new array every render, and two `useMemo`s
+  // below depend on this list.
+  const calls = useMemo(() => (tag ? (tagged.data ?? []) : recent), [tag, tagged.data, recent]);
+  const tagName = tagList.data?.tags.find((entry) => entry.id === tag)?.name;
 
   const [query, setQuery] = useState("");
   const [status, setStatus] = useState(initialStatus);
@@ -115,7 +141,10 @@ function CallsExplorer({
     const intents = Array.from(
       new Set(calls.map((call) => call.intent).filter((value): value is string => Boolean(value))),
     ).sort();
-    return [{ value: "", label: "Any intent" }, ...intents.map((value) => ({ value, label: humanize(value) }))];
+    return [
+      { value: "", label: "Any intent" },
+      ...intents.map((value) => ({ value, label: humanize(value) })),
+    ];
   }, [calls]);
 
   const filtered = useMemo(
@@ -160,6 +189,18 @@ function CallsExplorer({
         }
       />
 
+      {tag ? (
+        <Alert tone="info" title="Filtered by tag">
+          <span className="flex flex-wrap items-center gap-2">
+            Showing calls tagged{" "}
+            <span className="font-semibold text-ink">{tagName ?? "with this tag"}</span>.
+            <Button size="sm" variant="ghost" onClick={() => router.push("/dashboard/calls")}>
+              Show all calls
+            </Button>
+          </span>
+        </Alert>
+      ) : null}
+
       <Card className="p-4 sm:p-5">
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-[minmax(0,1.6fr)_repeat(4,minmax(0,1fr))]">
           <TextField
@@ -193,6 +234,24 @@ function CallsExplorer({
             value={duration}
             options={DURATION_OPTIONS}
             onChange={(event) => setDuration(event.target.value as DurationRange)}
+          />
+          <SelectField
+            label="Tag"
+            value={tag}
+            options={[
+              { value: "", label: "Any tag" },
+              ...(tagList.data?.tags ?? []).map((entry) => ({
+                value: entry.id,
+                label: entry.name,
+              })),
+            ]}
+            onChange={(event) =>
+              router.push(
+                event.target.value
+                  ? `/dashboard/calls?tag=${event.target.value}`
+                  : "/dashboard/calls",
+              )
+            }
           />
         </div>
         <div className="mt-4 flex flex-wrap items-center justify-between gap-3 border-t border-line pt-4">

@@ -216,6 +216,12 @@ export interface CallView {
   callback_number: string | null;
   intent: string | null;
   urgency: number | null;
+  /**
+   * The labels the classifier put on this call. Distinct from `intent`,
+   * which is one free-text guess from the summary; these are the business's
+   * own closed set.
+   */
+  tags: CallTagLabel[];
 }
 
 /** The error envelope every backend failure uses. */
@@ -312,6 +318,15 @@ export interface BusinessProfileView {
    * one — so it is followed rather than read out word for word.
    */
   custom_goodbye: string | null;
+  /**
+   * The voice the owner chose, or null while the greeting style's default is
+   * still in use. An id; the names live in the vendor's catalogue.
+   */
+  voice_id: string | null;
+  /** How fast it talks, or null for the vendor's default of 1. */
+  speaking_speed: number | null;
+  /** How quickly it answers, or null for the recommended setting. */
+  responsiveness: Responsiveness | null;
   escalation_raw: string | null;
   escalation: EscalationPolicy | null;
   /** The live opening line callers hear, once a configuration is live. */
@@ -547,6 +562,12 @@ export interface AgentSettingsUpdate {
   custom_greeting: string;
   /** Omit to leave the sign-off alone; "" removes it. */
   custom_goodbye?: string;
+  /** Omit to leave the voice alone. */
+  voice_id?: string;
+  /** Omit to leave the talking speed alone. The vendor's range is 0.7 to 1.2. */
+  speaking_speed?: number;
+  /** Omit to leave the responsiveness alone. */
+  responsiveness?: Responsiveness;
   escalation_rules: string;
   /**
    * The owner's label for the receptionist. Omit to leave it alone; "" clears
@@ -697,6 +718,76 @@ export interface GreetingRulePatch {
   start_date?: string | null;
   end_date?: string | null;
   enabled?: boolean;
+}
+
+/**
+ * The swatch beside a tag's name.
+ *
+ * A closed set rather than a free hex value: a customer-chosen colour is
+ * unreadable on one of the two themes, and nobody picking one in a modal is
+ * checking it against a dark background. Each maps to a palette variable.
+ */
+export const TAG_COLORS = [
+  { value: "green", label: "Green", token: "--avatar-moss" },
+  { value: "amber", label: "Amber", token: "--avatar-amber" },
+  { value: "red", label: "Red", token: "--avatar-rose" },
+  { value: "blue", label: "Blue", token: "--avatar-azure" },
+  { value: "violet", label: "Violet", token: "--avatar-violet" },
+  { value: "teal", label: "Teal", token: "--avatar-teal" },
+  { value: "indigo", label: "Indigo", token: "--avatar-indigo" },
+  { value: "slate", label: "Grey", token: "--avatar-slate" },
+] as const;
+
+export type TagColor = (typeof TAG_COLORS)[number]["value"];
+
+/** The CSS variable a tag's colour is drawn from. */
+export function tagColorToken(color: TagColor): string {
+  return TAG_COLORS.find((entry) => entry.value === color)?.token ?? "--avatar-slate";
+}
+
+/** One label a business sorts its calls by. */
+export interface CallTagView {
+  id: string;
+  name: string;
+  /** When the receptionist should apply it. Read by the classifier. */
+  description: string;
+  color: TagColor;
+  /** Off keeps the calls it already marked and stops it being applied again. */
+  enabled: boolean;
+  position: number;
+  created_at: string;
+}
+
+export interface CallTagsView {
+  tags: CallTagView[];
+  /** The cap, so the UI can stop offering "add" instead of being refused. */
+  max_tags: number;
+  /** How many are enabled — what the cap counts. */
+  active: number;
+}
+
+export interface CallTagInput {
+  name: string;
+  description: string;
+  color?: TagColor;
+  enabled?: boolean;
+}
+
+/** An edit. An omitted field is left alone. */
+export interface CallTagPatch {
+  name?: string;
+  description?: string;
+  color?: TagColor;
+  enabled?: boolean;
+}
+
+/**
+ * A tag as it appears *on a call* — the label, not the rule behind it.
+ */
+export interface CallTagLabel {
+  id: string;
+  name: string;
+  color: TagColor;
 }
 
 /** One timezone a business may pick, as the server offers it. */
@@ -901,11 +992,90 @@ export interface CrawlSummaryView {
   reasons: Record<string, number>;
 }
 
-/** A voice this deployment is configured for. Never an invented one. */
+/**
+ * One receptionist, as the gallery shows it.
+ *
+ * Flat on purpose: the gallery reads across every business an account has, and
+ * a card that needed its own request per business would make the first screen
+ * an owner sees the slowest one.
+ */
+export interface ReceptionistCardView {
+  tenant_id: string;
+  name: string;
+  /** The tenant's own state: `active`, `provisioning`, `cancelled`... */
+  status: string;
+  /** What this account may do with it. Deleting needs `owner`. */
+  role: MembershipRole;
+  agent_name: string | null;
+  /**
+   * Which drawn face represents it, derived from the voice it speaks with.
+   * Empty when no voice was chosen; the client draws one from the tenant id.
+   */
+  avatar: string;
+  /** The voice's name, when one was chosen and the catalogue could be read. */
+  voice: string | null;
+  phone_e164: string | null;
+  /**
+   * Whether a voice agent is live and answering — which is not the same as the
+   * business being active. One can be paid up and still mid setup.
+   */
+  live: boolean;
+  calls_recent: number;
+  /** The window `calls_recent` covers, so the card doesn't hard-code it. */
+  activity_days: number;
+  created_at: string;
+}
+
+/**
+ * How quickly the receptionist decides a caller has finished speaking.
+ *
+ * Three values because the voice vendor has three: `auto` is its recommended
+ * setting, and a fourth here would be two names for one behaviour.
+ */
+export type Responsiveness = "auto" | "low" | "high";
+
+/**
+ * The speeds the voice vendor accepts, as multipliers.
+ *
+ * Its own range, not ours: it refuses anything outside 0.7 to 1.2. `1` is the
+ * unaltered recording, which is why it is the one marked as most lifelike.
+ */
+export const SPEAKING_SPEEDS = [0.7, 0.85, 1, 1.1, 1.2] as const;
+
+/**
+ * A voice the receptionist can speak with.
+ *
+ * Everything describing it comes from the voice vendor's own catalogue — the
+ * name, the sentence, the sample. A deployment that cannot reach the catalogue
+ * still offers its configured voices, with no name and no sample rather than
+ * copy somebody wrote here.
+ */
 export interface VoiceOptionView {
   voice_id: string;
+  /** The short name: "Sarah", not "Sarah - Mature, Reassuring, Confident". */
   label: string;
+  /** The greeting style this voice is the default for, when it is one. */
   style: string | null;
+  /** The line under the name: "American · Warm and friendly female voice". */
+  summary: string;
+  /** The vendor's full sentence, shown in the expanded list. */
+  description: string | null;
+  accent: string | null;
+  gender: string | null;
+  age: string | null;
+  /** Two-letter code. Only English while the call path sends it. */
+  language: string;
+  /** A public MP3, played in the browser. Null when there is no sample. */
+  preview_url: string | null;
+  /** Whether to show it before the customer asks for the full list. */
+  recommended: boolean;
+  /**
+   * Which drawn face represents this voice, chosen server-side from the
+   * vendor's gender and age labels so the picture matches what a caller
+   * hears. Empty when the catalogue could not be read, and the client draws
+   * one from the voice id instead.
+   */
+  avatar: string;
 }
 
 export interface WebsiteSetupView {

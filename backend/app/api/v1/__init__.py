@@ -18,8 +18,10 @@ from app.api.v1 import (
     numbers,
     onboarding,
     portal,
+    receptionists,
     signups,
     sms,
+    tags,
     tenants,
     transfers,
     voice,
@@ -44,6 +46,9 @@ router.include_router(tenants.router)
 # The signed-in portal. Same `/tenants/{id}` prefix, but membership-only: none
 # of it is reachable with the status grant that opens the post-signup page.
 router.include_router(portal.router)
+# The one account-scoped read in the portal: every receptionist this user
+# has, for the gallery. Scoped by the membership join, not by a path value.
+router.include_router(receptionists.router)
 # Contacts: the same /tenants/{id} prefix, membership to read and admin to
 # write, like the rest of the portal.
 router.include_router(contacts.router)
@@ -53,6 +58,9 @@ router.include_router(transfers.router)
 # Scheduled greetings: the other half of the same section, and admin to write
 # for the same reason — it is what a caller hears first, spoken verbatim.
 router.include_router(greetings.router)
+# Call tags: the same section again, admin to write. Unlike the two above,
+# a tag publishes nothing — it is read after a call, never during one.
+router.include_router(tags.router)
 router.include_router(integrations.router)
 router.include_router(sms.router)
 router.include_router(webhooks.router)

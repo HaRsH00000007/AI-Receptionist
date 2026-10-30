@@ -14,7 +14,82 @@ from dataclasses import dataclass, field
 
 from app.core.errors import VendorError
 from app.providers.fakes.support import Behaviour, instance_token
-from app.providers.models import AgentRef, PhoneNumberRef, TransferTarget
+from app.providers.models import AgentRef, Delivery, PhoneNumberRef, TransferTarget, VoiceRef
+
+#: A stand-in catalogue, shaped like the real one.
+#:
+#: The ids are the three this product ships configured, so a test that picks
+#: "the first voice" picks something the rest of the system recognizes. The
+#: fourth is deliberately *not* in the configured map: it is what proves the
+#: picker offers more than the three styles, and that choosing one of those
+#: extras survives a publish.
+#:
+#: Sample URLs are obviously fake. Nothing plays them in a test, and a real
+#: vendor URL hard-coded here would be a network request inside the suite.
+FAKE_VOICES: tuple[VoiceRef, ...] = (
+    VoiceRef(
+        voice_id="21m00Tcm4TlvDq8ikWAM",
+        name="Janet - Clear, Professional",
+        description="Young adult woman with a clear, professional tone.",
+        accent="american",
+        gender="female",
+        age="young",
+        use_case="conversational",
+        language="en",
+        preview_url="https://example.invalid/voices/janet.mp3",
+        category="professional",
+    ),
+    VoiceRef(
+        voice_id="EXAVITQu4vr4xnSDxMaL",
+        name="Sarah - Mature, Reassuring, Confident",
+        description="Young adult woman with a confident and warm, mature quality.",
+        accent="american",
+        gender="female",
+        age="young",
+        use_case="conversational",
+        language="en",
+        preview_url="https://example.invalid/voices/sarah.mp3",
+        category="premade",
+    ),
+    VoiceRef(
+        voice_id="onwK4e9ZLuTAKqWW03F9",
+        name="Daniel - Steady Broadcaster",
+        description="Middle aged man with a formal, steady delivery.",
+        accent="british",
+        gender="male",
+        age="middle_aged",
+        use_case="informative_educational",
+        language="en",
+        preview_url="https://example.invalid/voices/daniel.mp3",
+        category="premade",
+    ),
+    VoiceRef(
+        voice_id="cjVigY5qzO86Huf0OWal",
+        name="Eric - Smooth, Trustworthy",
+        description="Middle aged man with a smooth, trustworthy tone.",
+        accent="american",
+        gender="male",
+        age="middle_aged",
+        use_case="conversational",
+        language="en",
+        preview_url="https://example.invalid/voices/eric.mp3",
+        category="premade",
+    ),
+    # Not English. Present so the filter that keeps the picker to voices the
+    # call path can actually speak has something to exclude.
+    VoiceRef(
+        voice_id="g3YpdjT1OTh9cunaumJs",
+        name="Layla - Modern Arabic",
+        description="Middle aged woman with a confident tone.",
+        accent="jordanian",
+        gender="female",
+        age="middle_aged",
+        use_case="narrative_story",
+        language="ar",
+        preview_url="https://example.invalid/voices/layla.mp3",
+        category="professional",
+    ),
+)
 
 
 @dataclass
@@ -28,6 +103,9 @@ class _StoredAgent:
     #: which is what lets a test prove that deleting the last transfer rule
     #: stops the vendor forwarding rather than quietly leaving it in place.
     transfers: tuple[TransferTarget, ...] = ()
+    #: How the last push said to speak. ``None`` is the vendor's default, and a
+    #: test can tell that apart from an explicit 1.0.
+    delivery: Delivery | None = None
 
     def to_ref(self) -> AgentRef:
         return AgentRef(
@@ -67,6 +145,11 @@ class FakeElevenLabsProvider:
     _agent_counter: itertools.count[int] = field(default_factory=lambda: itertools.count(1))
     _phone_counter: itertools.count[int] = field(default_factory=lambda: itertools.count(1))
 
+    # ---- voices ----------------------------------------------------------
+    async def list_voices(self) -> Sequence[VoiceRef]:
+        self.behaviour.record("list_voices")
+        return FAKE_VOICES
+
     # ---- agents ----------------------------------------------------------
     async def create_agent(
         self,
@@ -76,6 +159,7 @@ class FakeElevenLabsProvider:
         first_message: str,
         voice_id: str,
         transfers: Sequence[TransferTarget] = (),
+        delivery: Delivery | None = None,
     ) -> AgentRef:
         self.behaviour.record("create_agent", name=name, voice_id=voice_id)
 
@@ -96,6 +180,7 @@ class FakeElevenLabsProvider:
             system_prompt=system_prompt,
             first_message=first_message,
             transfers=tuple(transfers),
+            delivery=delivery,
         )
         self.agents[agent.agent_id] = agent
         return agent.to_ref()
@@ -121,6 +206,7 @@ class FakeElevenLabsProvider:
         first_message: str,
         voice_id: str,
         transfers: Sequence[TransferTarget] = (),
+        delivery: Delivery | None = None,
     ) -> AgentRef:
         self.behaviour.record("update_agent", agent_id=agent_id, transfers=len(transfers))
         agent = self.agents.get(agent_id)
@@ -139,6 +225,7 @@ class FakeElevenLabsProvider:
         agent.voice_id = voice_id
         # Replaced, never merged: the caller passes the complete set.
         agent.transfers = tuple(transfers)
+        agent.delivery = delivery
         return agent.to_ref()
 
     async def delete_agent(self, *, agent_id: str) -> None:
