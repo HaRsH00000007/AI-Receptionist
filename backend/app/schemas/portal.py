@@ -339,11 +339,47 @@ class IntegrationView(BaseModel):
     connected_at: datetime | None = None
     #: Why a connection needs attention, in words the customer can act on.
     last_error: str | None = None
+    #: Whether this integration is a calendar the receptionist could book into,
+    #: so the page knows whether to offer the calendar picker at all.
+    bookable: bool = False
+    #: The calendar appointments are written to, as the owner named it. ``None``
+    #: on a connection where nobody has chosen one yet — which is also when the
+    #: receptionist has no booking tools.
+    calendar_name: str | None = None
 
 
 class IntegrationListView(BaseModel):
     business_type: str
     integrations: list[IntegrationView]
+
+
+class CalendarOption(BaseModel):
+    """One calendar in a connected account."""
+
+    id: str
+    name: str
+    primary: bool
+    #: False where the grant cannot create events in it — a calendar shared
+    #: read-only is listed but cannot be chosen, and saying so is kinder than
+    #: refusing the save with no explanation.
+    writable: bool
+
+
+class CalendarOptionList(BaseModel):
+    calendars: list[CalendarOption]
+    #: The one currently in use, if any.
+    selected_id: str | None = None
+
+
+class CalendarChoice(BaseModel):
+    """Which calendar to book into."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    #: Provider-assigned: Google's are address-shaped, Microsoft's are long
+    #: base64url strings. Bounded rather than patterned, and checked against the
+    #: account's real list before it is stored.
+    calendar_id: str = Field(min_length=1, max_length=1024)
 
 
 class ConnectStart(BaseModel):

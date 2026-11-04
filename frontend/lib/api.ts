@@ -36,6 +36,7 @@ import type {
   GreetingRulePatch,
   GreetingRuleResult,
   GreetingRulesView,
+  CalendarOptionList,
   IntegrationCheckView,
   IntegrationListView,
   IntegrationView,
@@ -566,6 +567,27 @@ export function disconnectIntegration(tenantId: string, provider: string): Promi
   return send<IntegrationView>(
     `${tenantId}/integrations/${encodeURIComponent(provider)}/disconnect`,
     "POST",
+  );
+}
+
+/** The calendars in the connected account. A live call to the provider. */
+export function listCalendars(tenantId: string, provider: string): Promise<CalendarOptionList> {
+  return portal<CalendarOptionList>(
+    `${tenantId}/integrations/${encodeURIComponent(provider)}/calendars`,
+  );
+}
+
+/** Choose the calendar the receptionist books into. This is what turns booking
+ *  on for a business, so the agent is updated by the same request. */
+export function chooseCalendar(
+  tenantId: string,
+  provider: string,
+  calendarId: string,
+): Promise<IntegrationView> {
+  return send<IntegrationView>(
+    `${tenantId}/integrations/${encodeURIComponent(provider)}/calendar`,
+    "PUT",
+    { calendar_id: calendarId },
   );
 }
 

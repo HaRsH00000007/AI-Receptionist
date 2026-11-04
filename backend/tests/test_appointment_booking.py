@@ -11,8 +11,14 @@ The properties under test, in order of how much damage their failure would do:
 2. Nothing is booked over a busy time, outside opening hours, or twice — not by
    a repeated call, and not by two callers racing for one slot.
 3. A failure is reported as "not booked", never as a booking.
-4. The agent has the tools exactly while a calendar is connected, and is told
-   how to use them.
+4. The agent has the tools exactly while a business has *chosen* a calendar to
+   book into, and is told how to use them.
+
+Everything here books into a **secondary** calendar, not the account's default,
+because booking into the wrong calendar is silent: the caller is told a time is
+free, the owner never sees the appointment, and nothing errors. So the fake
+records which calendar every query and every create named, and the tests assert
+it.
 """
 
 from __future__ import annotations
@@ -22,8 +28,8 @@ import json
 import uuid
 from collections.abc import AsyncIterator
 from datetime import UTC, date, datetime, time, timedelta
-from typing import Any
-from urllib.parse import parse_qs, urlparse
+from typing import Any, cast
+from urllib.parse import parse_qs, unquote, urlparse
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -32,21 +38,26 @@ from cryptography.fernet import Fernet
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.integrations.providers.base import CalendarEvent
 from app.integrations.providers.google_calendar import GoogleCalendar
+from app.integrations.service import IntegrationService
 from app.main import create_app
 from app.models import Agent, Appointment, BusinessProfile, Tenant
-from app.models.enums import AgentStatus, AppointmentStatus
+from app.models.enums import AgentStatus, AppointmentStatus, IntegrationProvider
 from app.providers.models import ToolParameter, WebhookTool
 from app.providers.real.voice import ElevenLabsRestProvider
+from app.schemas.business import BusinessHours
+from app.services.appointment_booking import AppointmentBooking, _local, _Window, _window
 from app.services.calendar_tools import (
     BOOK_APPOINTMENT,
     CHECK_AVAILABILITY,
     TOKEN_HEADER,
+    booking_supported,
     tool_token,
 )
-from tests.portal_support import COOKIE, Owner, live_owner, other_tenant
+from tests.portal_support import COOKIE, Owner, add_member, live_owner, other_tenant
 from tests.support import build_settings
 
 ENCRYPTION_KEY = Fernet.generate_key().decode()
@@ -70,15 +81,40 @@ WEEKDAY_HOURS = {
 # ---------------------------------------------------------------------------
 
 
+#: The account's default calendar, and the separate one a business would
+#: realistically keep its appointments in.
+DEFAULT_CALENDAR = "owner@example.com"
+BOOKINGS_CALENDAR = "bookings@group.calendar.google.com"
+SHARED_CALENDAR = "roster@group.calendar.google.com"
+
+
 class FakeGoogle:
     def __init__(self) -> None:
         self.busy: list[tuple[datetime, datetime]] = []
         self.events: dict[str, dict[str, Any]] = {}
         self.create_status: int | None = None
         self.creates = 0
+        #: 403 when the grant predates the calendar-list scope.
+        self.list_status: int | None = None
+        #: Which calendar each call named, so selection can be asserted rather
+        #: than assumed from a passing booking.
+        self.freebusy_for: list[str] = []
+        self.created_in: list[str] = []
+        self.deleted_from: list[tuple[str, str]] = []
+        self.calendars: list[dict[str, Any]] = [
+            {
+                "id": DEFAULT_CALENDAR,
+                "summary": "Owner",
+                "primary": True,
+                "accessRole": "owner",
+            },
+            {"id": BOOKINGS_CALENDAR, "summary": "Bookings", "accessRole": "writer"},
+            # Shared read-only: listed, never a valid choice.
+            {"id": SHARED_CALENDAR, "summary": "Shared roster", "accessRole": "reader"},
+        ]
 
     def handler(self, request: httpx.Request) -> httpx.Response:
-        path = request.url.path
+        path = unquote(request.url.path)
         if path.endswith("/token"):
             return httpx.Response(
                 200,
@@ -93,26 +129,123 @@ class FakeGoogle:
             return httpx.Response(200, json={"email": "owner@example.com"})
         if path == "/revoke":
             return httpx.Response(200)
+        if path == "/calendar/v3/users/me/calendarList":
+            if self.list_status is not None:
+                return httpx.Response(self.list_status, json={"error": "insufficient scope"})
+            return httpx.Response(200, json={"items": self.calendars})
         if path == "/calendar/v3/freeBusy":
+            asked = json.loads(request.content)["items"][0]["id"]
+            self.freebusy_for.append(asked)
             busy = [
                 {"start": start.astimezone(UTC).isoformat(), "end": end.astimezone(UTC).isoformat()}
                 for start, end in self.busy
             ]
-            return httpx.Response(200, json={"calendars": {"primary": {"busy": busy}}})
-        if path == "/calendar/v3/calendars/primary/events" and request.method == "POST":
-            self.creates += 1
-            if self.create_status is not None:
-                return httpx.Response(self.create_status, json={"error": "boom"})
-            body = json.loads(request.content)
-            event_id = body.get("id") or f"evt{len(self.events)}"
-            if event_id in self.events:
-                return httpx.Response(409, json={"error": "duplicate"})
-            self.events[event_id] = body
-            return httpx.Response(200, json={**body, "id": event_id})
-        if path.startswith("/calendar/v3/calendars/primary/events/") and request.method == "DELETE":
-            self.events.pop(path.rsplit("/", 1)[-1], None)
-            return httpx.Response(204)
+            return httpx.Response(200, json={"calendars": {asked: {"busy": busy}}})
+        if path.startswith("/calendar/v3/calendars/") and "/events" in path:
+            calendar_id, _, tail = path[len("/calendar/v3/calendars/") :].partition("/events")
+            if request.method == "POST" and not tail:
+                self.creates += 1
+                self.created_in.append(calendar_id)
+                if self.create_status is not None:
+                    return httpx.Response(self.create_status, json={"error": "boom"})
+                body = json.loads(request.content)
+                event_id = body.get("id") or f"evt{len(self.events)}"
+                if event_id in self.events:
+                    return httpx.Response(409, json={"error": "duplicate"})
+                self.events[event_id] = body
+                return httpx.Response(200, json={**body, "id": event_id})
+            if request.method == "DELETE" and tail.startswith("/"):
+                event_id = tail.lstrip("/")
+                self.deleted_from.append((calendar_id, event_id))
+                self.events.pop(event_id, None)
+                return httpx.Response(204)
         return httpx.Response(404, json={"error": f"unexpected {request.method} {request.url}"})
+
+
+class FakeOutlook:
+    """Microsoft Graph, enough of it to connect a calendar and book into one."""
+
+    #: Graph calendar ids are long base64url strings; the padding is what makes
+    #: percent-encoding the path matter.
+    DEFAULT = "AAMkAGI2TAAA-default="
+    BOOKINGS = "AAMkAGI2TAAA-bookings=="
+
+    def __init__(self) -> None:
+        self.busy: list[tuple[datetime, datetime]] = []
+        self.events: dict[str, dict[str, Any]] = {}
+        self.create_status: int | None = None
+        self.creates = 0
+        self.view_for: list[str] = []
+        self.created_in: list[str] = []
+        self.deleted: list[str] = []
+        #: Graph's idempotency: the same transactionId returns the first event.
+        self.by_transaction: dict[str, str] = {}
+        self.calendars: list[dict[str, Any]] = [
+            {"id": self.DEFAULT, "name": "Calendar", "isDefaultCalendar": True, "canEdit": True},
+            {"id": self.BOOKINGS, "name": "Bookings", "isDefaultCalendar": False, "canEdit": True},
+            {"id": "AAMkAGI2TAAA-shared", "name": "Team (read only)", "canEdit": False},
+        ]
+
+    def handler(self, request: httpx.Request) -> httpx.Response:
+        path = unquote(request.url.path)
+        if path.endswith("/oauth2/v2.0/token"):
+            return httpx.Response(
+                200,
+                json={
+                    "access_token": "graph-access",
+                    "refresh_token": "graph-refresh",
+                    "expires_in": 3599,
+                    "scope": "offline_access Calendars.ReadWrite",
+                },
+            )
+        if path == "/v1.0/me":
+            return httpx.Response(200, json={"userPrincipalName": "owner@outlook.test"})
+        if path == "/v1.0/me/calendars":
+            return httpx.Response(200, json={"value": self.calendars})
+        if path.startswith("/v1.0/me/calendars/") and path.endswith("/calendarView"):
+            calendar_id = path[len("/v1.0/me/calendars/") : -len("/calendarView")]
+            self.view_for.append(calendar_id)
+            return httpx.Response(
+                200,
+                json={
+                    "value": [
+                        {
+                            "showAs": "busy",
+                            "isCancelled": False,
+                            "start": {"dateTime": _graph_stamp(start), "timeZone": "UTC"},
+                            "end": {"dateTime": _graph_stamp(end), "timeZone": "UTC"},
+                        }
+                        for start, end in self.busy
+                    ]
+                },
+            )
+        if path.startswith("/v1.0/me/calendars/") and "/events" in path:
+            calendar_id, _, tail = path[len("/v1.0/me/calendars/") :].partition("/events")
+            if request.method == "POST" and not tail:
+                self.creates += 1
+                self.created_in.append(calendar_id)
+                if self.create_status is not None:
+                    return httpx.Response(self.create_status, json={"error": "boom"})
+                body = json.loads(request.content)
+                transaction = body.get("transactionId")
+                if transaction and transaction in self.by_transaction:
+                    first = self.by_transaction[transaction]
+                    return httpx.Response(201, json={**self.events[first], "id": first})
+                event_id = f"evt{len(self.events)}"
+                self.events[event_id] = body
+                if transaction:
+                    self.by_transaction[transaction] = event_id
+                return httpx.Response(201, json={**body, "id": event_id})
+            if request.method == "DELETE" and tail.startswith("/"):
+                self.deleted.append(tail.lstrip("/"))
+                self.events.pop(tail.lstrip("/"), None)
+                return httpx.Response(204)
+        return httpx.Response(404, json={"error": f"unexpected {request.method} {request.url}"})
+
+
+def _graph_stamp(moment: datetime) -> str:
+    """Graph's own shape: no offset, seven fractional digits."""
+    return moment.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S.0000000")
 
 
 @pytest.fixture
@@ -121,7 +254,14 @@ def google() -> FakeGoogle:
 
 
 @pytest.fixture
-async def booking_app(migrated_database: str, google: FakeGoogle) -> AsyncIterator[FastAPI]:
+def outlook() -> FakeOutlook:
+    return FakeOutlook()
+
+
+@pytest.fixture
+async def booking_app(
+    migrated_database: str, google: FakeGoogle, outlook: FakeOutlook
+) -> AsyncIterator[FastAPI]:
     from app.db.session import create_engine
     from tests.worker_fixtures import truncate_all
 
@@ -133,12 +273,21 @@ async def booking_app(migrated_database: str, google: FakeGoogle) -> AsyncIterat
         integration_encryption_key=ENCRYPTION_KEY,
         google_oauth_client_id="google-client-id",
         google_oauth_client_secret="google-client-secret",
+        microsoft_oauth_client_id="microsoft-client-id",
+        microsoft_oauth_client_secret="microsoft-client-secret",
         public_app_url=APP_URL,
         public_api_url=API_URL,
+        # Off by default, so every test that expects booking says so.
+        calendar_booking_enabled=True,
     )
     application = create_app(settings)
     async with application.router.lifespan_context(application):
-        application.state.integration_transport = httpx.MockTransport(google.handler)
+
+        def route(request: httpx.Request) -> httpx.Response:
+            microsoft = request.url.host in {"graph.microsoft.com", "login.microsoftonline.com"}
+            return (outlook if microsoft else google).handler(request)
+
+        application.state.integration_transport = httpx.MockTransport(route)
         try:
             yield application
         finally:
@@ -178,20 +327,34 @@ async def _business(client: AsyncClient, app: FastAPI) -> Owner:
     return owner
 
 
-async def _connect(client: AsyncClient, owner: Owner) -> None:
+async def _connect(client: AsyncClient, owner: Owner, provider: str = "google_calendar") -> None:
     started = await client.post(
-        f"/api/v1/tenants/{owner.tenant_id}/integrations/google_calendar/connect",
+        f"/api/v1/tenants/{owner.tenant_id}/integrations/{provider}/connect",
         headers=owner.headers,
     )
     assert started.status_code == 200, started.text
     state = parse_qs(urlparse(started.json()["authorization_url"]).query)["state"][0]
     landed = await client.get(
-        "/api/v1/integrations/oauth/google_calendar/callback",
+        f"/api/v1/integrations/oauth/{provider}/callback",
         params={"code": "code", "state": state},
         headers={"Cookie": f"{COOKIE}={owner.token}"},
     )
     assert landed.status_code == 303
-    assert "connected=google_calendar" in landed.headers["location"]
+    assert f"connected={provider}" in landed.headers["location"]
+
+
+async def _choose(
+    client: AsyncClient,
+    owner: Owner,
+    calendar_id: str,
+    provider: str = "google_calendar",
+) -> httpx.Response:
+    """Pick the calendar to book into, the way the dashboard does."""
+    return await client.put(
+        f"/api/v1/tenants/{owner.tenant_id}/integrations/{provider}/calendar",
+        json={"calendar_id": calendar_id},
+        headers=owner.headers,
+    )
 
 
 async def _agent(app: FastAPI, tenant_id: uuid.UUID) -> Agent:
@@ -249,8 +412,15 @@ async def _appointments(app: FastAPI, tenant_id: uuid.UUID) -> list[Appointment]
 async def connected(
     client: AsyncClient, booking_app: FastAPI
 ) -> tuple[Owner, dict[str, WebhookTool]]:
+    """A business that has connected Google *and* chosen a calendar.
+
+    The chosen one is the secondary "Bookings" calendar, so every test that
+    follows proves the business's own choice is used rather than the default.
+    """
     owner = await _business(client, booking_app)
     await _connect(client, owner)
+    chosen = await _choose(client, owner, BOOKINGS_CALENDAR)
+    assert chosen.status_code == 200, chosen.text
     return owner, await _tools(booking_app, owner.tenant_id)
 
 
@@ -674,3 +844,446 @@ async def test_google_treats_a_duplicate_event_id_as_the_earlier_success() -> No
         idempotency_key="abc123def",
     )
     assert await adapter.create_event(access_token="token", event=event) == "abc123def"
+
+
+# ---------------------------------------------------------------------------
+# Which calendar, and whether booking is on at all
+# ---------------------------------------------------------------------------
+
+
+async def test_connecting_a_calendar_does_not_by_itself_arm_booking(
+    client: AsyncClient, booking_app: FastAPI
+) -> None:
+    """Connecting means "see when I am busy". Writing to a calendar is a
+    second, separate decision, and an upgrade must not make it on the owner's
+    behalf — least of all on the next agent push after they edit a greeting."""
+    owner = await _business(client, booking_app)
+    await _connect(client, owner)
+
+    assert await _tools(booking_app, owner.tenant_id) == {}
+    stored = _vendor_agent(booking_app, await _agent(booking_app, owner.tenant_id))
+    assert not stored.tool_ids
+    assert "book_appointment" not in stored.system_prompt
+
+
+async def test_choosing_a_calendar_is_what_gives_the_agent_its_tools(
+    client: AsyncClient, booking_app: FastAPI
+) -> None:
+    owner = await _business(client, booking_app)
+    await _connect(client, owner)
+    chosen = await _choose(client, owner, BOOKINGS_CALENDAR)
+
+    assert chosen.status_code == 200, chosen.text
+    assert chosen.json()["calendar_name"] == "Bookings"
+    assert chosen.json()["bookable"] is True
+    assert set(await _tools(booking_app, owner.tenant_id)) == {
+        CHECK_AVAILABILITY,
+        BOOK_APPOINTMENT,
+    }
+
+
+async def test_availability_and_booking_use_the_chosen_calendar(
+    connected: tuple[Owner, dict[str, WebhookTool]],
+    client: AsyncClient,
+    google: FakeGoogle,
+) -> None:
+    """The bug this guards: booking into the account's default calendar instead
+    of the one the business keeps its appointments in. Nothing errors — the
+    caller is told a time is free and the owner never sees the appointment."""
+    _, tools = connected
+    day = _weekday(2)
+    await _call(client, tools[CHECK_AVAILABILITY], {"date": day.isoformat()})
+    booked = (await _call(client, tools[BOOK_APPOINTMENT], _booking(day))).json()
+
+    assert booked["result"] == "booked", booked
+    assert google.freebusy_for, "no free/busy query was made"
+    assert set(google.freebusy_for) == {BOOKINGS_CALENDAR}
+    assert google.created_in == [BOOKINGS_CALENDAR]
+    assert DEFAULT_CALENDAR not in google.freebusy_for + google.created_in
+
+
+async def test_a_calendar_outside_the_account_is_refused(
+    client: AsyncClient, booking_app: FastAPI
+) -> None:
+    """The id is checked against the account's own list, not trusted. Storing
+    one that is not there would fail on every booking instead of on the save."""
+    owner = await _business(client, booking_app)
+    await _connect(client, owner)
+
+    refused = await _choose(client, owner, "someone-elses@group.calendar.google.com")
+
+    assert refused.status_code == 404
+    assert await _tools(booking_app, owner.tenant_id) == {}
+
+
+async def test_a_read_only_calendar_cannot_be_chosen(
+    client: AsyncClient, booking_app: FastAPI
+) -> None:
+    """It can be read for availability but never written to, so offering it as
+    a booking target would promise appointments that cannot be made."""
+    owner = await _business(client, booking_app)
+    await _connect(client, owner)
+
+    refused = await _choose(client, owner, SHARED_CALENDAR)
+
+    assert refused.status_code == 409
+    assert refused.json()["error"]["code"] == "calendar_not_writable"
+    assert await _tools(booking_app, owner.tenant_id) == {}
+
+
+async def test_a_grant_without_the_list_scope_asks_for_a_reconnect(
+    client: AsyncClient, booking_app: FastAPI, google: FakeGoogle
+) -> None:
+    """Connections made before the calendar-list scope was asked for cannot
+    enumerate calendars, and only the owner can fix that."""
+    owner = await _business(client, booking_app)
+    await _connect(client, owner)
+    google.list_status = 403
+
+    listed = await client.get(
+        f"/api/v1/tenants/{owner.tenant_id}/integrations/google_calendar/calendars",
+        headers=owner.headers,
+    )
+
+    assert listed.status_code == 409
+    assert listed.json()["error"]["code"] == "integration_scope_missing"
+
+
+async def test_the_calendar_list_names_the_default_first(
+    client: AsyncClient, booking_app: FastAPI
+) -> None:
+    owner = await _business(client, booking_app)
+    await _connect(client, owner)
+
+    listed = await client.get(
+        f"/api/v1/tenants/{owner.tenant_id}/integrations/google_calendar/calendars",
+        headers=owner.headers,
+    )
+
+    assert listed.status_code == 200, listed.text
+    body = listed.json()
+    assert body["selected_id"] is None
+    assert next(entry["id"] for entry in body["calendars"]) == DEFAULT_CALENDAR
+    assert body["calendars"][0]["primary"] is True
+    assert {entry["id"]: entry["writable"] for entry in body["calendars"]}[SHARED_CALENDAR] is False
+
+
+async def test_only_an_admin_can_choose_the_calendar(
+    client: AsyncClient, booking_app: FastAPI
+) -> None:
+    owner = await _business(client, booking_app)
+    await _connect(client, owner)
+    member = await add_member(booking_app, owner.tenant_id)
+
+    refused = await client.put(
+        f"/api/v1/tenants/{owner.tenant_id}/integrations/google_calendar/calendar",
+        json={"calendar_id": BOOKINGS_CALENDAR},
+        headers=member,
+    )
+
+    assert refused.status_code == 403
+    assert await _tools(booking_app, owner.tenant_id) == {}
+
+
+async def test_another_business_cannot_choose_this_ones_calendar(
+    client: AsyncClient, booking_app: FastAPI
+) -> None:
+    owner = await _business(client, booking_app)
+    await _connect(client, owner)
+    _, intruder = await other_tenant(booking_app)
+
+    refused = await client.put(
+        f"/api/v1/tenants/{owner.tenant_id}/integrations/google_calendar/calendar",
+        json={"calendar_id": BOOKINGS_CALENDAR},
+        headers=intruder,
+    )
+
+    assert refused.status_code in {403, 404}
+    assert await _tools(booking_app, owner.tenant_id) == {}
+
+
+def test_booking_is_off_until_a_deployment_turns_it_on() -> None:
+    """The default that decides whether an upgrade changes what every agent does."""
+    assert build_settings().calendar_booking_enabled is False
+
+
+def test_a_deployment_with_booking_off_carries_no_tools() -> None:
+    agent = Agent(tenant_id=uuid.uuid4(), status=AgentStatus.ACTIVE)
+    settings = build_settings(
+        calendar_booking_enabled=False, public_api_url=API_URL, auth_secret_key="x" * 32
+    )
+
+    assert booking_supported(settings, agent) is False
+    assert booking_supported(settings.model_copy(update={"calendar_booking_enabled": True}), agent)
+
+
+# ---------------------------------------------------------------------------
+# When the clocks change
+#
+# The slot arithmetic is pure, so these assert it directly against fixed dates
+# rather than through a booking — a transition that is inside the booking
+# horizon today is outside it next month, and a test that silently stops
+# exercising its subject is worse than no test.
+# ---------------------------------------------------------------------------
+
+#: America/New_York, 2027: 02:00 becomes 03:00, so 02:00 to 02:59 never happens.
+SPRING_FORWARD = date(2027, 3, 14)
+#: And 2026: 02:00 becomes 01:00, so 01:00 to 01:59 happens twice.
+FALL_BACK = date(2026, 11, 1)
+
+
+def _booking_engine(**overrides: Any) -> AppointmentBooking:
+    """The service with no database behind it. Enough for the slot arithmetic,
+    which is the only part of booking that DST can get wrong."""
+    return AppointmentBooking(
+        cast(AsyncSession, None), build_settings(**overrides), cast(IntegrationService, None)
+    )
+
+
+def _all_day(day: date) -> _Window:
+    """Local midnight to local midnight — 23, 24 or 25 hours depending on the day."""
+    return _Window(
+        opens=datetime.combine(day, time(0, 0), tzinfo=ZONE),
+        closes=datetime.combine(day + timedelta(days=1), time(0, 0), tzinfo=ZONE),
+    )
+
+
+def test_a_time_the_clocks_skip_does_not_exist() -> None:
+    """02:30 on the spring-forward day is not a time. Booking it would store an
+    instant an hour from the one everybody said out loud."""
+    assert _local(SPRING_FORWARD, time(2, 30), ZONE) is None
+    assert _local(SPRING_FORWARD, time(1, 30), ZONE) is not None
+    assert _local(SPRING_FORWARD, time(3, 30), ZONE) is not None
+
+
+def test_a_time_the_clocks_repeat_is_the_first_pass() -> None:
+    """01:30 happens twice on the fall-back day. The earlier one is taken, which
+    is what a caller saying "half one" means and what the owner's calendar shows."""
+    moment = _local(FALL_BACK, time(1, 30), ZONE)
+
+    assert moment is not None
+    # Still daylight time: UTC-4, so 05:30Z rather than 06:30Z.
+    assert moment.utcoffset() == timedelta(hours=-4)
+    assert moment.astimezone(UTC).strftime("%H:%M") == "05:30"
+
+
+def test_the_slots_on_a_day_the_clocks_change_are_real_distinct_times() -> None:
+    """Stepping in local time would invent an hour in March and repeat one in
+    November. Stepping in UTC gives a 23-hour and a 25-hour day, which is what
+    those days are."""
+    engine = _booking_engine()
+    earliest = datetime(2020, 1, 1, tzinfo=UTC)
+
+    short = engine._free(_all_day(SPRING_FORWARD), [], earliest)
+    long = engine._free(_all_day(FALL_BACK), [], earliest)
+    ordinary = engine._free(_all_day(date(2026, 11, 4)), [], earliest)
+
+    assert len(ordinary) == 48
+    assert len(short) == 46
+    assert len(long) == 50
+    for slots in (short, long, ordinary):
+        assert len({slot.astimezone(UTC) for slot in slots}) == len(slots)
+    # The hour that does not exist is offered on neither side of midnight.
+    assert not [slot for slot in short if slot.strftime("%H:%M") == "02:30"]
+
+
+def test_opening_hours_stay_on_the_wall_clock_across_a_transition() -> None:
+    """Nine o'clock is nine o'clock on both sides of the change; it is the UTC
+    offset that moves, which is exactly what a business means by its hours."""
+    hours = BusinessHours.model_validate(
+        {
+            "timezone": TIMEZONE,
+            "days": [
+                {"day": day, "opens_at": "09:00", "closes_at": "17:00"}
+                for day in (
+                    "monday",
+                    "tuesday",
+                    "wednesday",
+                    "thursday",
+                    "friday",
+                    "saturday",
+                    "sunday",
+                )
+            ],
+        }
+    )
+
+    before = _window(hours, FALL_BACK - timedelta(days=1), ZONE)
+    after = _window(hours, FALL_BACK + timedelta(days=1), ZONE)
+
+    assert before is not None and after is not None
+    assert before.opens.strftime("%H:%M") == after.opens.strftime("%H:%M") == "09:00"
+    assert before.opens.utcoffset() == timedelta(hours=-4)
+    assert after.opens.utcoffset() == timedelta(hours=-5)
+
+
+# ---------------------------------------------------------------------------
+# The event exists but we could not record it
+# ---------------------------------------------------------------------------
+
+
+async def test_an_event_we_cannot_record_is_taken_back_off_the_calendar(
+    connected: tuple[Owner, dict[str, WebhookTool]],
+    client: AsyncClient,
+    booking_app: FastAPI,
+    google: FakeGoogle,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The window between a created event and the row that remembers it.
+
+    Left alone, the owner's calendar holds an appointment this product has no
+    record of: it will not be shown, not reconciled, and counted as free the
+    next time somebody asks. So the event is cancelled and the caller is told
+    the booking is not confirmed.
+    """
+    owner, tools = connected
+    day = _weekday(2)
+
+    original = AsyncSession.commit
+    failures = {"left": 1}
+
+    async def flaky(self: AsyncSession) -> None:
+        if failures["left"]:
+            failures["left"] -= 1
+            raise RuntimeError("the database went away mid-booking")
+        await original(self)
+
+    monkeypatch.setattr(AsyncSession, "commit", flaky)
+    body = (await _call(client, tools[BOOK_APPOINTMENT], _booking(day))).json()
+    monkeypatch.undo()
+
+    assert body["result"] == "calendar_unavailable"
+    # The agent is told not to promise, because the appointment does not exist.
+    assert body["message"].startswith("Don't promise a time")
+    # Created, then taken back off the chosen calendar.
+    assert google.creates == 1
+    assert [calendar for calendar, _ in google.deleted_from] == [BOOKINGS_CALENDAR]
+    assert google.events == {}
+    assert await _appointments(booking_app, owner.tenant_id) == []
+
+
+async def test_a_booking_the_calendar_rejects_leaves_no_row(
+    connected: tuple[Owner, dict[str, WebhookTool]],
+    client: AsyncClient,
+    booking_app: FastAPI,
+    google: FakeGoogle,
+) -> None:
+    owner, tools = connected
+    google.create_status = 500
+
+    body = (await _call(client, tools[BOOK_APPOINTMENT], _booking(_weekday(2)))).json()
+
+    assert body["result"] == "calendar_unavailable"
+    assert google.events == {}
+    assert await _appointments(booking_app, owner.tenant_id) == []
+
+
+# ---------------------------------------------------------------------------
+# Outlook
+#
+# The same properties as Google, against Microsoft Graph: the chosen calendar is
+# used, a repeat is one booking, and a refusal is never reported as booked.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+async def outlook_connected(
+    client: AsyncClient, booking_app: FastAPI
+) -> tuple[Owner, dict[str, WebhookTool]]:
+    """A business booking into a secondary Outlook calendar, Google unconnected."""
+    owner = await _business(client, booking_app)
+    await _connect(client, owner, "microsoft_outlook")
+    chosen = await _choose(client, owner, FakeOutlook.BOOKINGS, "microsoft_outlook")
+    assert chosen.status_code == 200, chosen.text
+    return owner, await _tools(booking_app, owner.tenant_id)
+
+
+async def test_outlook_books_into_the_chosen_calendar(
+    outlook_connected: tuple[Owner, dict[str, WebhookTool]],
+    client: AsyncClient,
+    booking_app: FastAPI,
+    outlook: FakeOutlook,
+) -> None:
+    owner, tools = outlook_connected
+    day = _weekday(2)
+
+    body = (await _call(client, tools[BOOK_APPOINTMENT], _booking(day))).json()
+
+    assert body["result"] == "booked", body
+    assert body["appointment"]["time"] == "14:00"
+    assert outlook.created_in == [FakeOutlook.BOOKINGS]
+    assert outlook.view_for and set(outlook.view_for) == {FakeOutlook.BOOKINGS}
+    assert FakeOutlook.DEFAULT not in outlook.created_in + outlook.view_for
+
+    [appointment] = await _appointments(booking_app, owner.tenant_id)
+    assert appointment.provider is IntegrationProvider.MICROSOFT_OUTLOOK
+    assert appointment.starts_at == _at(day, 14)
+    assert appointment.external_event_id in outlook.events
+
+
+async def test_outlook_carries_graphs_own_idempotency_key(
+    outlook_connected: tuple[Owner, dict[str, WebhookTool]],
+    client: AsyncClient,
+    outlook: FakeOutlook,
+) -> None:
+    """``transactionId`` is what makes a create that timed out after succeeding
+    find the first event rather than add a second."""
+    _, tools = outlook_connected
+
+    await _call(client, tools[BOOK_APPOINTMENT], _booking(_weekday(2)))
+
+    [event] = outlook.events.values()
+    assert event["transactionId"]
+    assert list(outlook.by_transaction) == [event["transactionId"]]
+
+
+async def test_outlook_books_a_repeated_request_once(
+    outlook_connected: tuple[Owner, dict[str, WebhookTool]],
+    client: AsyncClient,
+    booking_app: FastAPI,
+    outlook: FakeOutlook,
+) -> None:
+    owner, tools = outlook_connected
+    day = _weekday(2)
+
+    first = (await _call(client, tools[BOOK_APPOINTMENT], _booking(day))).json()
+    again = (await _call(client, tools[BOOK_APPOINTMENT], _booking(day))).json()
+
+    assert first["result"] == "booked"
+    assert again["result"] == "already_booked"
+    assert len(outlook.events) == 1
+    assert len(await _appointments(booking_app, owner.tenant_id)) == 1
+
+
+async def test_outlook_refuses_a_slot_its_calendar_says_is_busy(
+    outlook_connected: tuple[Owner, dict[str, WebhookTool]],
+    client: AsyncClient,
+    booking_app: FastAPI,
+    outlook: FakeOutlook,
+) -> None:
+    owner, tools = outlook_connected
+    day = _weekday(2)
+    outlook.busy = [(_at(day, 13, 45), _at(day, 14, 15))]
+
+    body = (await _call(client, tools[BOOK_APPOINTMENT], _booking(day))).json()
+
+    assert body["result"] == "slot_taken"
+    assert outlook.creates == 0
+    assert await _appointments(booking_app, owner.tenant_id) == []
+
+
+async def test_an_outlook_failure_is_never_reported_as_booked(
+    outlook_connected: tuple[Owner, dict[str, WebhookTool]],
+    client: AsyncClient,
+    booking_app: FastAPI,
+    outlook: FakeOutlook,
+) -> None:
+    owner, tools = outlook_connected
+    outlook.create_status = 503
+
+    body = (await _call(client, tools[BOOK_APPOINTMENT], _booking(_weekday(2)))).json()
+
+    assert body["result"] == "calendar_unavailable"
+    assert "Don't tell the caller" in body["message"]
+    assert outlook.events == {}
+    assert await _appointments(booking_app, owner.tenant_id) == []

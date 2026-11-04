@@ -511,20 +511,26 @@ class AppointmentBooking:
             idempotency_key=key,
         )
         self.session.add(appointment)
+        # Read before the commit that may fail. `rollback()` expires every
+        # loaded object, so touching `tenant.id` or `calendar.provider` after it
+        # goes back to the database — in the one branch that runs *because* the
+        # database just failed. That lazy load raised, which skipped the
+        # cancellation below and left the event on the owner's calendar with
+        # nothing here remembering it.
+        whose = {"tenant_id": str(tenant.id), "provider": calendar.provider.value}
         try:
             await self.session.commit()
         except Exception:
             await self.session.rollback()
             logger.exception(
-                "booked an event but could not record it; removing the event",
-                extra={"tenant_id": str(tenant.id), "provider": calendar.provider.value},
+                "booked an event but could not record it; removing the event", extra=whose
             )
             try:
                 await calendar.cancel_event(event_id)
             except Exception:
                 logger.exception(
                     "could not remove an unrecorded event; the owner's calendar holds it",
-                    extra={"tenant_id": str(tenant.id), "provider": calendar.provider.value},
+                    extra=whose,
                 )
             return {
                 **base,
@@ -532,14 +538,7 @@ class AppointmentBooking:
                 "message": _FALLBACK_MESSAGE,
             }
 
-        logger.info(
-            "appointment booked",
-            extra={
-                "tenant_id": str(tenant.id),
-                "appointment_id": str(appointment.id),
-                "provider": calendar.provider.value,
-            },
-        )
+        logger.info("appointment booked", extra={**whose, "appointment_id": str(appointment.id)})
         local_start = start.astimezone(zone)
         return {
             **base,

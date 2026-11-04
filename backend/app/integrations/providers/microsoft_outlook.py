@@ -8,6 +8,10 @@ every refresh result is written back (see ``TokenSet.from_response``).
 Availability reads ``calendarView`` rather than ``getSchedule``: it needs no
 mailbox address, works for personal accounts, and ``showAs`` says exactly which
 events block time.
+
+``Calendars.ReadWrite`` already covers enumerating the account's calendars, so
+choosing one needs no extra scope here and no reconnect — unlike Google, where
+the list is a scope of its own.
 """
 
 from __future__ import annotations
@@ -19,6 +23,7 @@ from app.integrations.providers.base import (
     BusyInterval,
     CalendarEvent,
     CalendarIntegration,
+    CalendarRef,
     TokenSet,
     iso_utc,
 )
@@ -30,6 +35,9 @@ GRAPH_BASE = "https://graph.microsoft.com/v1.0"
 
 #: The `showAs` values that mean the owner cannot take an appointment.
 _BLOCKING = frozenset({"busy", "tentative", "oof", "workingelsewhere"})
+
+#: Graph's roles on a calendar that allow creating an event in it.
+_WRITABLE_ROLES = frozenset({"write", "owner"})
 
 
 class MicrosoftOutlook(CalendarIntegration):
@@ -117,12 +125,50 @@ class MicrosoftOutlook(CalendarIntegration):
     # `revoke` stands. The customer can remove the app at myapps.microsoft.com.
 
     # ---- calendar --------------------------------------------------------
+    @staticmethod
+    def _scope(calendar_id: str | None) -> str:
+        """The path prefix for one calendar, or the mailbox's default.
+
+        Graph spells the default as ``/me/events`` rather than a calendar id, so
+        an account that has not chosen keeps exactly the path it had before
+        calendars could be chosen.
+        """
+        return f"/me/calendars/{quote(calendar_id, safe='')}" if calendar_id else "/me"
+
+    async def list_calendars(self, *, access_token: str) -> list[CalendarRef]:
+        async with self._client(GRAPH_BASE, access_token) as http:
+            body = await http.get(
+                "/me/calendars",
+                params={"$select": "id,name,isDefaultCalendar,canEdit", "$top": "250"},
+            )
+        calendars: list[CalendarRef] = []
+        for entry in (body or {}).get("value", []):
+            if not isinstance(entry, dict) or not entry.get("id"):
+                continue
+            calendars.append(
+                CalendarRef(
+                    id=str(entry["id"]),
+                    name=str(entry.get("name") or entry["id"]),
+                    primary=bool(entry.get("isDefaultCalendar")),
+                    # `canEdit` is absent on some mailboxes; absent is not a
+                    # refusal, and a create that is refused is reported then.
+                    writable=bool(entry.get("canEdit", True)),
+                )
+            )
+        calendars.sort(key=lambda calendar: (not calendar.primary, calendar.name.lower()))
+        return calendars
+
     async def busy_intervals(
-        self, *, access_token: str, start: datetime, end: datetime
+        self,
+        *,
+        access_token: str,
+        start: datetime,
+        end: datetime,
+        calendar_id: str | None = None,
     ) -> list[BusyInterval]:
         async with self._client(GRAPH_BASE, access_token, utc=True) as http:
             body = await http.get(
-                "/me/calendarView",
+                f"{self._scope(calendar_id)}/calendarView",
                 params={
                     "startDateTime": iso_utc(start),
                     "endDateTime": iso_utc(end),
@@ -144,10 +190,12 @@ class MicrosoftOutlook(CalendarIntegration):
             )
         return intervals
 
-    async def create_event(self, *, access_token: str, event: CalendarEvent) -> str:
+    async def create_event(
+        self, *, access_token: str, event: CalendarEvent, calendar_id: str | None = None
+    ) -> str:
         async with self._client(GRAPH_BASE, access_token) as http:
             body = await http.post(
-                "/me/events",
+                f"{self._scope(calendar_id)}/events",
                 json={
                     "subject": event.title,
                     "body": {"contentType": "text", "content": event.description},
@@ -160,9 +208,18 @@ class MicrosoftOutlook(CalendarIntegration):
             )
         return str(body["id"])
 
-    async def cancel_event(self, *, access_token: str, event_id: str) -> None:
+    async def cancel_event(
+        self, *, access_token: str, event_id: str, calendar_id: str | None = None
+    ) -> None:
         async with self._client(GRAPH_BASE, access_token) as http:
-            await http.delete(f"/me/events/{quote(event_id, safe='')}", expected=(204, 404))
+            # An event is addressable under /me/events whichever calendar holds
+            # it, so cancelling does not need the calendar — but it is accepted
+            # and used, because a mailbox with delegated access resolves the id
+            # against the calendar it was created in.
+            await http.delete(
+                f"{self._scope(calendar_id)}/events/{quote(event_id, safe='')}",
+                expected=(204, 404),
+            )
 
 
 def _graph_time(value: str) -> datetime:

@@ -69,6 +69,21 @@ class BusyInterval:
 
 
 @dataclass(frozen=True, slots=True)
+class CalendarRef:
+    """One calendar in a connected account, as the owner would recognise it."""
+
+    id: str
+    name: str
+    #: The account's default calendar. Offered first, and what an account that
+    #: has never chosen falls back to.
+    primary: bool = False
+    #: Whether the grant allows writing events to it. A calendar someone shared
+    #: read-only can be read for availability but never booked into, so offering
+    #: it as a booking target would promise appointments that cannot be made.
+    writable: bool = True
+
+
+@dataclass(frozen=True, slots=True)
 class CalendarEvent:
     title: str
     start: datetime
@@ -117,17 +132,44 @@ class OAuthIntegration(ABC):
 
 
 class CalendarIntegration(OAuthIntegration):
+    """A calendar account.
+
+    Every call names the calendar it acts on. ``calendar_id=None`` means the
+    account's default calendar, which is what an account connected before
+    calendars could be chosen still uses — so the parameter is additive and no
+    existing connection changes behaviour by being upgraded.
+    """
+
+    #: The extra scope needed to enumerate the account's calendars, where the
+    #: provider requires one beyond those already granted. A connection made
+    #: before it was asked for will not have it, so ``list_calendars`` is
+    #: expected to fail for those and the caller offers a reconnect.
+    calendar_list_scope: str | None = None
+
+    @abstractmethod
+    async def list_calendars(self, *, access_token: str) -> list[CalendarRef]:
+        """The calendars in the account, default first."""
+
     @abstractmethod
     async def busy_intervals(
-        self, *, access_token: str, start: datetime, end: datetime
+        self,
+        *,
+        access_token: str,
+        start: datetime,
+        end: datetime,
+        calendar_id: str | None = None,
     ) -> list[BusyInterval]: ...
 
     @abstractmethod
-    async def create_event(self, *, access_token: str, event: CalendarEvent) -> str:
+    async def create_event(
+        self, *, access_token: str, event: CalendarEvent, calendar_id: str | None = None
+    ) -> str:
         """Create the event and return the provider's id for it."""
 
     @abstractmethod
-    async def cancel_event(self, *, access_token: str, event_id: str) -> None: ...
+    async def cancel_event(
+        self, *, access_token: str, event_id: str, calendar_id: str | None = None
+    ) -> None: ...
 
 
 def iso_utc(moment: datetime) -> str:

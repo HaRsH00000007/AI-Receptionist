@@ -255,10 +255,18 @@ class Settings(BaseSettings):
     microsoft_oauth_tenant: str = "common"
 
     # ---- Appointment booking ----------------------------------------------
-    #: Whether a receptionist whose business has a connected calendar is given
-    #: the check-availability and book-appointment tools. Off removes them from
-    #: every agent on its next push; the calendar connection itself is kept.
-    calendar_booking_enabled: bool = True
+    #: Whether this deployment offers booking at all. Off removes the
+    #: check-availability and book-appointment tools from every agent on its
+    #: next push; the calendar connection itself is kept.
+    #:
+    #: **Off by default, deliberately.** Two separate things have to be true
+    #: before a receptionist can write to anybody's calendar: the operator
+    #: turned the feature on here, and the business chose which calendar to
+    #: book into. Defaulting this to on would have armed booking for every
+    #: tenant with a connected calendar at its next agent push — a push that
+    #: happens whenever an owner edits a greeting — which is not a thing a
+    #: deployment should start doing because it upgraded.
+    calendar_booking_enabled: bool = False
     #: How long a booked appointment is, and the step between offered slots.
     booking_slot_minutes: int = Field(default=30, ge=10, le=240)
     #: The soonest a caller may book, so nobody is booked into a slot that has

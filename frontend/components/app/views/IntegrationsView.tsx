@@ -18,6 +18,12 @@
  *
  * "Connected" is only ever shown when the API says so, which it only does after
  * a real OAuth exchange.
+ *
+ * A connected calendar is not yet a calendar the receptionist books into: that
+ * needs the owner to say *which* calendar, which is what the picker below is
+ * for. Until they do, the card says so, because the alternative — guessing the
+ * account's default — writes appointments somewhere nobody chose and nothing
+ * reports it.
  */
 
 import { useRouter, useSearchParams } from "next/navigation";
@@ -41,17 +47,24 @@ import {
   ZapIcon,
   type IconProps,
 } from "@/components/ui/icons";
+import { SelectField } from "@/components/ui/Field";
 import { PageHeader } from "@/components/ui/PageHeader";
 import { useToast } from "@/components/ui/Toast";
 import {
   ApiError,
+  chooseCalendar,
   connectIntegration,
   disconnectIntegration,
+  listCalendars,
   listIntegrations,
   verifyIntegration,
 } from "@/lib/api";
 import { formatDate, pluralize } from "@/lib/format";
-import { businessTypeLabel, type IntegrationView } from "@/lib/types";
+import {
+  businessTypeLabel,
+  type CalendarOption,
+  type IntegrationView,
+} from "@/lib/types";
 
 /** Our own icons, keyed by the catalog's `icon`. Never a vendor's logo. */
 const ICONS: Record<string, ComponentType<IconProps>> = {
@@ -232,9 +245,11 @@ export function IntegrationsView() {
                   entry={entry}
                   canManage={canManage}
                   busy={busy === entry.id}
+                  tenantId={tenantId}
                   onConnect={() => void connect(entry)}
                   onVerify={() => void verify(entry)}
                   onDisconnect={() => setConfirming(entry)}
+                  onChanged={() => catalog.reload()}
                 />
               ))}
             </div>
@@ -261,16 +276,20 @@ function IntegrationCard({
   entry,
   canManage,
   busy,
+  tenantId,
   onConnect,
   onVerify,
   onDisconnect,
+  onChanged,
 }: {
   entry: IntegrationView;
   canManage: boolean;
   busy: boolean;
+  tenantId: string;
   onConnect: () => void;
   onVerify: () => void;
   onDisconnect: () => void;
+  onChanged: () => void;
 }) {
   const Icon = ICONS[entry.icon] ?? PlugIcon;
   const connected = entry.status === "connected";
@@ -321,6 +340,10 @@ function IntegrationCard({
         </p>
       )}
 
+      {connected && entry.bookable && canManage && (
+        <CalendarPicker entry={entry} tenantId={tenantId} onChanged={onChanged} />
+      )}
+
       {canManage && entry.availability === "available" && (
         <div className="mt-5 flex flex-wrap gap-2 border-t border-line pt-4">
           {connected ? (
@@ -366,4 +389,111 @@ function StatusBadge({ entry }: { entry: IntegrationView }) {
     return <Badge tone="warn">Configuration required</Badge>;
   }
   return <Badge tone="neutral">Not connected</Badge>;
+}
+
+/**
+ * Which calendar in the connected account the receptionist books into.
+ *
+ * The list is fetched only when the owner asks for it, because reading it is a
+ * live call to Google or Microsoft and most visits to this page are not about
+ * changing calendars.
+ */
+function CalendarPicker({
+  entry,
+  tenantId,
+  onChanged,
+}: {
+  entry: IntegrationView;
+  tenantId: string;
+  onChanged: () => void;
+}) {
+  const toast = useToast();
+  const [options, setOptions] = useState<CalendarOption[] | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [problem, setProblem] = useState<string | null>(null);
+
+  async function open() {
+    setLoading(true);
+    setProblem(null);
+    try {
+      const list = await listCalendars(tenantId, entry.id);
+      setOptions(list.calendars);
+    } catch (caught) {
+      setProblem(
+        caught instanceof ApiError ? caught.message : "We couldn't read your calendars.",
+      );
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function choose(calendarId: string) {
+    setSaving(true);
+    try {
+      await chooseCalendar(tenantId, entry.id, calendarId);
+      toast({
+        tone: "success",
+        title: "Calendar chosen",
+        description: "Your receptionist will book appointments into it from the next call.",
+      });
+      setOptions(null);
+      onChanged();
+    } catch (caught) {
+      toast({
+        tone: "danger",
+        title: "Couldn't use that calendar",
+        description: caught instanceof ApiError ? caught.message : "Please try again.",
+      });
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  if (options) {
+    return (
+      <div className="mt-4 border-t border-line pt-4">
+        <SelectField
+          label="Book appointments into"
+          hint="Only calendars you can add events to can be chosen."
+          defaultValue={options.find((option) => option.name === entry.calendar_name)?.id ?? ""}
+          disabled={saving}
+          onChange={(event) => event.target.value && void choose(event.target.value)}
+          options={[
+            { value: "", label: "Choose a calendar…" },
+            ...options.map((option) => ({
+              value: option.writable ? option.id : "",
+              label: option.writable
+                ? `${option.name}${option.primary ? " (default)" : ""}`
+                : `${option.name} — read only`,
+            })),
+          ]}
+        />
+      </div>
+    );
+  }
+
+  return (
+    <div className="mt-4 border-t border-line pt-4">
+      {entry.calendar_name ? (
+        <p className="text-sm text-ink-2">
+          Booking into <span className="font-medium">{entry.calendar_name}</span>
+        </p>
+      ) : (
+        <p className="text-sm text-muted">
+          Choose a calendar to let your receptionist book appointments.
+        </p>
+      )}
+      {problem && <p className="mt-2 text-sm text-danger">{problem}</p>}
+      <Button
+        className="mt-2"
+        size="sm"
+        variant="secondary"
+        loading={loading}
+        onClick={() => void open()}
+      >
+        {entry.calendar_name ? "Change calendar" : "Choose calendar"}
+      </Button>
+    </div>
+  );
 }

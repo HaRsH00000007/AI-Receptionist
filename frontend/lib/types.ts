@@ -841,6 +841,26 @@ export interface IntegrationView {
   account: string | null;
   connected_at: string | null;
   last_error: string | null;
+  /** Whether this is a calendar the receptionist could book into. */
+  bookable: boolean;
+  /**
+   * The calendar appointments go into, as the owner named it. Null until
+   * somebody chooses one — which is also while the receptionist cannot book.
+   */
+  calendar_name: string | null;
+}
+
+export interface CalendarOption {
+  id: string;
+  name: string;
+  primary: boolean;
+  /** False for a calendar shared read-only: listed, but not a valid choice. */
+  writable: boolean;
+}
+
+export interface CalendarOptionList {
+  calendars: CalendarOption[];
+  selected_id: string | null;
 }
 
 export interface IntegrationListView {

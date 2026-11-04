@@ -511,6 +511,9 @@ class AuditAction(StrEnum):
     BUSINESS_CREATED = "business_created"
     INTEGRATION_CONNECTED = "integration_connected"
     INTEGRATION_DISCONNECTED = "integration_disconnected"
+    #: The owner picked which calendar in the account to book into. Recorded
+    #: because it is the act that lets the receptionist write to a calendar.
+    INTEGRATION_CALENDAR_CHOSEN = "integration_calendar_chosen"
     SMS_REGISTRATION_SAVED = "sms_registration_saved"
     SMS_REGISTRATION_SUBMITTED = "sms_registration_submitted"
     SMS_REGISTRATION_REVIEWED = "sms_registration_reviewed"

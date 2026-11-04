@@ -36,6 +36,7 @@ from app.integrations.providers.base import (
     BusyInterval,
     CalendarEvent,
     CalendarIntegration,
+    CalendarRef,
     OAuthIntegration,
     TokenSet,
 )
@@ -78,6 +79,22 @@ BOOKING_CALENDARS: tuple[IntegrationProvider, ...] = (
     IntegrationProvider.MICROSOFT_OUTLOOK,
 )
 
+#: Where the chosen calendar lives in ``tenant_integrations.settings_json``.
+#: Not a secret and not a credential: an id and a name, so the page can say
+#: which calendar is in use without calling the provider.
+CALENDAR_ID_KEY = "calendar_id"
+CALENDAR_NAME_KEY = "calendar_name"
+
+
+def chosen_calendar_id(row: TenantIntegration | None) -> str | None:
+    """The calendar this connection books into, or ``None`` for the default.
+
+    One reader for the setting, so "which calendar?" is answered the same way by
+    availability, booking and the page.
+    """
+    value = (row.settings_json or {}).get(CALENDAR_ID_KEY) if row is not None else None
+    return str(value) if value else None
+
 
 @dataclass(frozen=True, slots=True)
 class OpenCalendar:
@@ -94,26 +111,34 @@ class OpenCalendar:
     provider: IntegrationProvider
     adapter: CalendarIntegration
     token: str
+    #: The calendar the business chose, or ``None`` for the account's default.
+    calendar_id: str | None = None
 
     async def busy_intervals(self, *, start: datetime, end: datetime) -> list[BusyInterval]:
         return await self.service._guarded(
             self.tenant,
             self.provider,
-            self.adapter.busy_intervals(access_token=self.token, start=start, end=end),
+            self.adapter.busy_intervals(
+                access_token=self.token, start=start, end=end, calendar_id=self.calendar_id
+            ),
         )
 
     async def create_event(self, event: CalendarEvent) -> str:
         return await self.service._guarded(
             self.tenant,
             self.provider,
-            self.adapter.create_event(access_token=self.token, event=event),
+            self.adapter.create_event(
+                access_token=self.token, event=event, calendar_id=self.calendar_id
+            ),
         )
 
     async def cancel_event(self, event_id: str) -> None:
         await self.service._guarded(
             self.tenant,
             self.provider,
-            self.adapter.cancel_event(access_token=self.token, event_id=event_id),
+            self.adapter.cancel_event(
+                access_token=self.token, event_id=event_id, calendar_id=self.calendar_id
+            ),
         )
 
 
@@ -282,9 +307,21 @@ class IntegrationService:
     async def booking_calendar(self, tenant: Tenant) -> IntegrationProvider | None:
         """The calendar the receptionist books into, or ``None`` if there is none.
 
-        Connected *and* usable on this server: a connection whose OAuth client or
-        encryption key has since been removed from the deployment cannot be
-        called, so it does not count.
+        Three things have to hold, and the third is the one that keeps booking
+        from arming itself:
+
+        * the integration is **connected**;
+        * it is **usable on this server** — a connection whose OAuth client or
+          encryption key has since been removed from the deployment cannot be
+          called, so it does not count;
+        * the business has **chosen which calendar to book into**.
+
+        Connecting a calendar has always meant "let the receptionist see when I
+        am busy". Reading it as "and write appointments into whichever calendar
+        happens to be the default" is a decision the owner never made, so the
+        choice is required rather than defaulted. Businesses that connected
+        before booking existed therefore keep exactly what they had until
+        somebody picks a calendar.
         """
         rows = (
             (
@@ -299,28 +336,116 @@ class IntegrationService:
             .scalars()
             .all()
         )
-        connected = {row.provider for row in rows}
+        chosen = {row.provider for row in rows if (row.settings_json or {}).get(CALENDAR_ID_KEY)}
         for provider in BOOKING_CALENDARS:
             if (
-                provider in connected
+                provider in chosen
                 and offered_to(provider, tenant.business_type)
                 and self.availability(provider) is Availability.AVAILABLE
             ):
                 return provider
         return None
 
+    async def selected_calendar_id(
+        self, tenant: Tenant, provider: IntegrationProvider
+    ) -> str | None:
+        """Which calendar this business books into, if it has chosen one."""
+        return chosen_calendar_id(await self._row(tenant.id, provider))
+
+    async def list_calendars(
+        self, tenant: Tenant, provider: IntegrationProvider
+    ) -> list[CalendarRef]:
+        """The calendars in the connected account, for the owner to choose from.
+
+        Raises :class:`ConflictError` where the grant predates the scope that
+        allows enumerating them, because the only fix is for the owner to
+        reconnect and the page has to be able to say so.
+        """
+        adapter, token = await self._calendar(tenant, provider)
+        try:
+            return await self._guarded(tenant, provider, adapter.list_calendars(access_token=token))
+        except VendorError as exc:
+            if exc.status_code in {401, 403} and adapter.calendar_list_scope:
+                raise ConflictError(
+                    "reconnect this calendar to choose which one to book into",
+                    code="integration_scope_missing",
+                ) from exc
+            raise
+
+    async def choose_calendar(
+        self,
+        tenant: Tenant,
+        provider: IntegrationProvider,
+        *,
+        calendar_id: str,
+        actor: Actor,
+    ) -> TenantIntegration:
+        """Record which calendar the receptionist books into.
+
+        The id is checked against the account's own list rather than trusted
+        from the request: an id that is not there, or is there read-only, would
+        otherwise be stored and then fail on every booking.
+        """
+        self._require_offered(tenant, provider)
+        row = await self._row(tenant.id, provider)
+        if row is None or row.status is not IntegrationStatus.CONNECTED:
+            raise ConflictError("connect this calendar first", code="integration_not_connected")
+
+        calendars = await self.list_calendars(tenant, provider)
+        match = next((entry for entry in calendars if entry.id == calendar_id), None)
+        if match is None:
+            raise NotFoundError("that calendar is not in this account")
+        if not match.writable:
+            raise ConflictError(
+                "appointments cannot be written to that calendar",
+                code="calendar_not_writable",
+            )
+
+        row.settings_json = {
+            **(row.settings_json or {}),
+            CALENDAR_ID_KEY: match.id,
+            CALENDAR_NAME_KEY: match.name,
+        }
+        self.audit.record(
+            AuditAction.INTEGRATION_CALENDAR_CHOSEN,
+            actor_type=actor.actor_type,
+            actor=actor.user,
+            tenant_id=tenant.id,
+            entity_type="tenant_integration",
+            entity_id=row.id,
+            # The name is the owner's own label for their calendar, which is
+            # what makes the log readable. Never the account's contents.
+            meta={"provider": provider.value, "calendar": match.name},
+        )
+        logger.info(
+            "booking calendar chosen",
+            extra={"tenant_id": str(tenant.id), "provider": provider.value},
+        )
+        return row
+
     async def open_calendar(self, tenant: Tenant, provider: IntegrationProvider) -> OpenCalendar:
         adapter, token = await self._calendar(tenant, provider)
+        row = await self._row(tenant.id, provider)
         return OpenCalendar(
-            service=self, tenant=tenant, provider=provider, adapter=adapter, token=token
+            service=self,
+            tenant=tenant,
+            provider=provider,
+            adapter=adapter,
+            token=token,
+            calendar_id=chosen_calendar_id(row),
         )
 
     async def busy_intervals(
         self, tenant: Tenant, provider: IntegrationProvider, *, start: datetime, end: datetime
     ) -> list[BusyInterval]:
         adapter, token = await self._calendar(tenant, provider)
+        row = await self._row(tenant.id, provider)
         return await self._guarded(
-            tenant, provider, adapter.busy_intervals(access_token=token, start=start, end=end)
+            tenant,
+            provider,
+            adapter.busy_intervals(
+                access_token=token, start=start, end=end, calendar_id=chosen_calendar_id(row)
+            ),
         )
 
     async def create_event(
@@ -333,15 +458,20 @@ class IntegrationService:
         receptionist from booking over anything it can see.
         """
         adapter, token = await self._calendar(tenant, provider)
+        calendar_id = chosen_calendar_id(await self._row(tenant.id, provider))
         busy = await self._guarded(
             tenant,
             provider,
-            adapter.busy_intervals(access_token=token, start=event.start, end=event.end),
+            adapter.busy_intervals(
+                access_token=token, start=event.start, end=event.end, calendar_id=calendar_id
+            ),
         )
         if any(slot.start < event.end and event.start < slot.end for slot in busy):
             raise ConflictError("that time is already booked", code="slot_unavailable")
         return await self._guarded(
-            tenant, provider, adapter.create_event(access_token=token, event=event)
+            tenant,
+            provider,
+            adapter.create_event(access_token=token, event=event, calendar_id=calendar_id),
         )
 
     # ---- internals -------------------------------------------------------

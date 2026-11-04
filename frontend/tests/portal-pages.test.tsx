@@ -67,6 +67,8 @@ vi.mock("@/lib/api", async () => {
     connectIntegration: vi.fn(),
     disconnectIntegration: vi.fn(),
     verifyIntegration: vi.fn(),
+    listCalendars: vi.fn(),
+    chooseCalendar: vi.fn(),
     getSmsState: vi.fn(),
     saveSmsRegistration: vi.fn(),
     submitSmsRegistration: vi.fn(),
@@ -133,6 +135,8 @@ function integration(overrides: Partial<IntegrationView>): IntegrationView {
     account: null,
     connected_at: null,
     last_error: null,
+    bookable: true,
+    calendar_name: null,
     ...overrides,
   };
 }
@@ -297,6 +301,84 @@ describe("Integrations", () => {
     // Practice management first for a law firm: its own system leads.
     const headings = screen.getAllByRole("heading", { level: 2 }).map((node) => node.textContent);
     expect(headings.slice(0, 3)).toEqual(["Practice management", "Calendars", "Automation"]);
+  });
+
+  it("says the receptionist cannot book until a calendar is chosen", async () => {
+    navigation.pathname = "/dashboard/integrations";
+    vi.mocked(api.listIntegrations).mockResolvedValue({
+      business_type: "legal",
+      integrations: [
+        integration({ status: "connected", account: "owner@gmail.example.com" }),
+      ],
+    });
+    renderPage(<IntegrationsView />);
+
+    const connected = await waitFor(() => card("Google Calendar"));
+    expect(
+      within(connected).getByText(/Choose a calendar to let your receptionist book/),
+    ).toBeInTheDocument();
+    expect(within(connected).getByRole("button", { name: "Choose calendar" })).toBeEnabled();
+  });
+
+  it("names the calendar appointments go into once one is chosen", async () => {
+    navigation.pathname = "/dashboard/integrations";
+    vi.mocked(api.listIntegrations).mockResolvedValue({
+      business_type: "legal",
+      integrations: [
+        integration({
+          status: "connected",
+          account: "owner@gmail.example.com",
+          calendar_name: "Bookings",
+        }),
+      ],
+    });
+    renderPage(<IntegrationsView />);
+
+    const connected = await waitFor(() => card("Google Calendar"));
+    expect(within(connected).getByText("Bookings")).toBeInTheDocument();
+    expect(within(connected).getByRole("button", { name: "Change calendar" })).toBeEnabled();
+  });
+
+  it("offers the account's calendars and saves the one picked", async () => {
+    navigation.pathname = "/dashboard/integrations";
+    vi.mocked(api.listIntegrations).mockResolvedValue({
+      business_type: "legal",
+      integrations: [
+        integration({ status: "connected", account: "owner@gmail.example.com" }),
+      ],
+    });
+    vi.mocked(api.listCalendars).mockResolvedValue({
+      selected_id: null,
+      calendars: [
+        { id: "owner@gmail.example.com", name: "Owner", primary: true, writable: true },
+        { id: "bookings@group.calendar.google.com", name: "Bookings", primary: false, writable: true },
+        { id: "roster@group.calendar.google.com", name: "Roster", primary: false, writable: false },
+      ],
+    });
+    vi.mocked(api.chooseCalendar).mockResolvedValue(
+      integration({ status: "connected", calendar_name: "Bookings" }),
+    );
+    renderPage(<IntegrationsView />);
+
+    fireEvent.click(
+      within(await waitFor(() => card("Google Calendar"))).getByRole("button", {
+        name: "Choose calendar",
+      }),
+    );
+    const picker = await screen.findByLabelText("Book appointments into");
+    // A calendar that cannot be written to is shown, but choosing it is not an
+    // option: it would promise appointments that could never be created.
+    expect(within(picker).getByText("Roster — read only")).toHaveValue("");
+
+    fireEvent.change(picker, { target: { value: "bookings@group.calendar.google.com" } });
+
+    await waitFor(() =>
+      expect(api.chooseCalendar).toHaveBeenCalledWith(
+        "t1",
+        "google_calendar",
+        "bookings@group.calendar.google.com",
+      ),
+    );
   });
 
   it("sends the owner to the provider's consent screen to connect", async () => {

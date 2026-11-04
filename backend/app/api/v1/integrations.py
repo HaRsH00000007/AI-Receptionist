@@ -33,10 +33,18 @@ from app.core.errors import AppError, AuthenticationError, AuthorizationError, N
 from app.core.logging import get_logger
 from app.db.session import SessionDep
 from app.integrations.oauth_state import verify_state
-from app.integrations.service import IntegrationEntry, IntegrationService
+from app.integrations.service import (
+    BOOKING_CALENDARS,
+    CALENDAR_NAME_KEY,
+    IntegrationEntry,
+    IntegrationService,
+)
 from app.models import Tenant
 from app.models.enums import IntegrationProvider, IntegrationStatus, MembershipRole
 from app.schemas.portal import (
+    CalendarChoice,
+    CalendarOption,
+    CalendarOptionList,
     ConnectStart,
     IntegrationCheckView,
     IntegrationListView,
@@ -92,6 +100,15 @@ def _view(entry: IntegrationEntry) -> IntegrationView:
         account=row.external_account_id if row is not None and status != "not_connected" else None,
         connected_at=row.connected_at if row is not None and status != "not_connected" else None,
         last_error=row.last_error if row is not None and status == "error" else None,
+        bookable=spec.id in BOOKING_CALENDARS,
+        # Only while connected: a disconnected row keeps its settings so that
+        # reconnecting remembers the choice, but the page must not claim a
+        # calendar is in use when nothing can reach it.
+        calendar_name=(
+            (row.settings_json or {}).get(CALENDAR_NAME_KEY)
+            if row is not None and status == "connected"
+            else None
+        ),
     )
 
 
@@ -184,6 +201,74 @@ async def disconnect_integration(
     await session.flush()
     await resync_tenant_agent(session, settings=settings, voice=providers.elevenlabs, tenant=tenant)
     return _view(await service.entry(tenant, chosen))
+
+
+@router.get(
+    "/tenants/{tenant_id}/integrations/{provider}/calendars",
+    response_model=CalendarOptionList,
+    summary="The calendars in the connected account",
+)
+async def list_calendars(
+    provider: str,
+    principal: RequireAdmin,
+    request: Request,
+    session: SessionDep,
+    settings: SettingsDep,
+) -> CalendarOptionList:
+    """A live call to the provider, so a calendar added today is offered today.
+
+    Names only — never what is in them.
+    """
+    tenant = await _tenant(session, principal)
+    chosen = _provider(provider)
+    service = IntegrationService(session, settings, transport=_transport(request))
+    calendars = await service.list_calendars(tenant, chosen)
+    return CalendarOptionList(
+        calendars=[
+            CalendarOption(
+                id=entry.id, name=entry.name, primary=entry.primary, writable=entry.writable
+            )
+            for entry in calendars
+        ],
+        selected_id=await service.selected_calendar_id(tenant, chosen),
+    )
+
+
+@router.put(
+    "/tenants/{tenant_id}/integrations/{provider}/calendar",
+    response_model=IntegrationView,
+    summary="Choose the calendar the receptionist books into",
+)
+async def choose_calendar(
+    provider: str,
+    payload: CalendarChoice,
+    principal: RequireAdmin,
+    request: Request,
+    session: SessionDep,
+    settings: SettingsDep,
+    providers: ProvidersDep,
+) -> IntegrationView:
+    """Record the choice, then give the receptionist its booking tools.
+
+    Choosing a calendar is what turns booking on for a business, so the agent is
+    resynced here for the same reason it is on connect: until it is pushed, the
+    receptionist would still be telling callers it cannot book.
+    """
+    tenant = await _tenant(session, principal)
+    picked = _provider(provider)
+    service = IntegrationService(session, settings, transport=_transport(request))
+    await service.choose_calendar(
+        tenant,
+        picked,
+        calendar_id=payload.calendar_id,
+        actor=Actor(user=principal.user, actor_type=principal.actor_type),
+    )
+    await session.commit()
+    if await resync_tenant_agent(
+        session, settings=settings, voice=providers.elevenlabs, tenant=tenant
+    ):
+        await session.commit()
+    return _view(await service.entry(tenant, picked))
 
 
 @router.post(
